@@ -1,0 +1,310 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ─── YurCore Design System ─────────────────────────────────────
+   YurCore Nova Direction
+   Palette: Cool Ivory · Electric Indigo · Steel Slate · Electric Teal · Amber
+   Typography: Space Grotesk · Inter
+──────────────────────────────────────────────────────────────── */
+
+@theme inline {
+  /* --- Semantic color mappings (light mode) ------------------- */
+  --color-background:         var(--background);
+  --color-foreground:         var(--foreground);
+  --color-card:               var(--card);
+  --color-card-foreground:    var(--card-foreground);
+  --color-popover:            var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary:            var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary:          var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted:              var(--muted);
+  --color-muted-foreground:   var(--muted-foreground);
+  --color-accent:             var(--accent);
+  --color-accent-foreground:  var(--accent-foreground);
+  --color-destructive:        var(--destructive);
+  --color-border:             var(--border);
+  --color-input:              var(--input);
+  --color-ring:               var(--ring);
+
+  /* --- YurCore brand tokens ----------------------------------- */
+  --color-herb-green:         var(--herb-green);
+  --color-herb-green-light:   var(--herb-green-light);
+  --color-sage:               var(--sage);
+  --color-copper:             var(--copper);
+  --color-copper-light:       var(--copper-light);
+  --color-ivory:              var(--ivory);
+  --color-ivory-deep:         var(--ivory-deep);
+  --color-sand:               var(--sand);
+  --color-clinical-dark:      var(--clinical-dark);
+  --color-ayur-gold:          var(--ayur-gold);
+
+  /* --- Charts ------------------------------------------------- */
+  --color-chart-1:            var(--chart-1);
+  --color-chart-2:            var(--chart-2);
+  --color-chart-3:            var(--chart-3);
+  --color-chart-4:            var(--chart-4);
+  --color-chart-5:            var(--chart-5);
+
+  /* --- Sidebar ------------------------------------------------- */
+  --color-sidebar:                    var(--sidebar);
+  --color-sidebar-foreground:         var(--sidebar-foreground);
+  --color-sidebar-primary:            var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent:             var(--sidebar-accent);
+  --color-sidebar-accent-foreground:  var(--sidebar-accent-foreground);
+  --color-sidebar-border:             var(--sidebar-border);
+  --color-sidebar-ring:               var(--sidebar-ring);
+
+  /* --- Radius scale ------------------------------------------- */
+  --radius-sm:  calc(var(--radius) * 0.6);
+  --radius-md:  calc(var(--radius) * 0.8);
+  --radius-lg:  var(--radius);
+  --radius-xl:  calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.4);
+
+  /* --- Fonts -------------------------------------------------- */
+  --font-sans:    var(--font-jakarta);
+  --font-display: var(--font-playfair);
+  --font-mono:    var(--font-geist-mono);
+}
+
+/* ─── Light Mode Tokens ────────────────────────────────────── */
+:root {
+  /* YurCore Nova brand palette */
+  --herb-green:       oklch(0.44 0.22 268);   /* electric indigo primary    */
+  --herb-green-light: oklch(0.58 0.18 268);   /* mid indigo                 */
+  --sage:             oklch(0.55 0.08 245);   /* steel slate                */
+  --copper:           oklch(0.54 0.17 196);   /* electric teal accent       */
+  --copper-light:     oklch(0.87 0.09 196);   /* soft teal highlight        */
+  --ivory:            oklch(0.99 0.005 268);  /* near-white, cool blue tint */
+  --ivory-deep:       oklch(0.96 0.010 260);  /* cool off-white surface     */
+  --sand:             oklch(0.92 0.006 255);  /* cool light grey            */
+  --clinical-dark:    oklch(0.14 0.030 268);  /* deep navy-black            */
+  --ayur-gold:        oklch(0.75 0.15 70);    /* electric amber             */
+
+  /* shadcn semantic mapping → YurCore Nova palette */
+  --background:           var(--ivory);
+  --foreground:           var(--clinical-dark);
+  --card:                 oklch(1 0 0);
+  --card-foreground:      var(--clinical-dark);
+  --popover:              oklch(1 0 0);
+  --popover-foreground:   var(--clinical-dark);
+  --primary:              var(--herb-green);
+  --primary-foreground:   oklch(0.99 0 0);
+  --secondary:            var(--ivory-deep);
+  --secondary-foreground: var(--clinical-dark);
+  --muted:                var(--sand);
+  --muted-foreground:     oklch(0.52 0.04 255);
+  --accent:               var(--copper-light);
+  --accent-foreground:    var(--clinical-dark);
+  --destructive:          oklch(0.57 0.22 28);
+  --border:               oklch(0.91 0.012 260);
+  --input:                oklch(0.94 0.008 260);
+  --ring:                 var(--herb-green);
+  --radius:               0.875rem;
+
+  /* chart colors */
+  --chart-1: var(--herb-green);
+  --chart-2: var(--copper);
+  --chart-3: var(--ayur-gold);
+  --chart-4: var(--sage);
+  --chart-5: oklch(0.65 0.15 310);
+
+  /* sidebar */
+  --sidebar:                    oklch(0.97 0.006 265);
+  --sidebar-foreground:         var(--clinical-dark);
+  --sidebar-primary:            var(--herb-green);
+  --sidebar-primary-foreground: oklch(0.99 0 0);
+  --sidebar-accent:             var(--ivory-deep);
+  --sidebar-accent-foreground:  var(--clinical-dark);
+  --sidebar-border:             oklch(0.91 0.012 260);
+  --sidebar-ring:               var(--herb-green);
+}
+
+/* ─── Base Layer ───────────────────────────────────────────── */
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply font-sans scroll-smooth;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "kern" 1, "liga" 1, "ss01" 1;
+    background-image: radial-gradient(ellipse 80% 60% at 50% -20%, oklch(0.44 0.22 268 / 0.04) 0%, transparent 70%);
+  }
+  h1, h2, h3 {
+    font-family: var(--font-display), "Arial", sans-serif;
+    letter-spacing: -0.02em;
+  }
+}
+
+
+/* ─── YurCore Utility Classes ──────────────────────────────── */
+@layer utilities {
+  .font-display {
+    font-family: var(--font-display), "Arial", sans-serif;
+  }
+
+  /* HPR verification shimmer badge */
+  .hpr-badge {
+    background: linear-gradient(
+      135deg,
+      oklch(0.44 0.22 268) 0%,
+      oklch(0.54 0.17 196) 100%
+    );
+    @apply text-white text-[10px] font-semibold tracking-wider uppercase px-2 py-0.5 rounded-full;
+  }
+
+  /* Subtle card elevation */
+  .card-elevated {
+    box-shadow:
+      0 1px 3px oklch(0.14 0.030 268 / 0.06),
+      0 4px 16px oklch(0.14 0.030 268 / 0.04);
+  }
+  .card-elevated:hover {
+    box-shadow:
+      0 2px 8px oklch(0.44 0.22 268 / 0.10),
+      0 8px 28px oklch(0.44 0.22 268 / 0.07);
+    transform: translateY(-1px);
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
+  }
+
+  /* Indigo → violet gradient backgrounds */
+  .bg-herb-gradient {
+    background: linear-gradient(
+      135deg,
+      oklch(0.44 0.22 268) 0%,
+      oklch(0.50 0.22 280) 100%
+    );
+  }
+
+  .bg-ivory-gradient {
+    background: linear-gradient(
+      180deg,
+      oklch(0.99 0.005 268) 0%,
+      oklch(0.96 0.010 260) 100%
+    );
+  }
+
+  /* AI bubble styles */
+  .ai-bubble {
+    background: linear-gradient(
+      135deg,
+      oklch(0.96 0.010 260) 0%,
+      oklch(0.97 0.006 265) 100%
+    );
+    border-left: 3px solid oklch(0.44 0.22 268);
+    @apply rounded-xl rounded-tl-sm p-3;
+  }
+
+  .user-bubble {
+    background: linear-gradient(135deg, oklch(0.44 0.22 268) 0%, oklch(0.50 0.22 280) 100%);
+    @apply text-white rounded-xl rounded-tr-sm p-3;
+  }
+
+  /* Dinacharya tick animation */
+  .task-complete {
+    @apply line-through text-muted-foreground;
+    text-decoration-color: oklch(0.44 0.22 268 / 0.5);
+  }
+
+  /* Teal accent border */
+  .border-copper {
+    border-color: oklch(0.54 0.17 196);
+  }
+
+  /* Bottom nav active state */
+  .nav-active {
+    color: oklch(0.44 0.22 268);
+  }
+  .nav-active::after {
+    content: '';
+    @apply absolute -bottom-1 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full;
+    background: oklch(0.44 0.22 268);
+  }
+}
+
+/* ─── International Phone Input ───────────────────────────── */
+
+@layer components {
+  .phone-wrapper {
+    width: 100%;
+    height: 44px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: #fff;
+    display: flex;
+    align-items: center;
+    padding: 0 10px;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+
+  .phone-wrapper:focus-within {
+    border-color: color-mix(in oklch, var(--herb-green) 50%, transparent);
+    box-shadow: 0 0 0 2px color-mix(
+      in oklch,
+      var(--herb-green) 8%,
+      transparent
+    );
+  }
+
+  .phone-input {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  /* Country selector */
+  .phone-input .PhoneInputCountry {
+    margin: 0;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+
+  .phone-input .PhoneInputCountrySelect {
+    cursor: pointer;
+    border: 0;
+    outline: 0;
+  }
+
+  /* Flag */
+  .phone-input .PhoneInputCountryIcon {
+    width: 23px;
+    height: 17px;
+  }
+
+  /* Dropdown arrow */
+  .phone-input .PhoneInputCountrySelectArrow {
+    margin-left: 1px;
+  }
+
+  /* Phone number */
+  .phone-input .PhoneInputInput {
+    min-width: 0;
+    width: 100%;
+    height: 38px;
+    border: none;
+    outline: none;
+    background: transparent;
+    font-size: 14px;
+    line-height: 1;
+    color: var(--foreground);
+    padding: 0;
+  }
+
+  .phone-input .PhoneInputInput::placeholder {
+    color: #9ca3af;
+  }
+}

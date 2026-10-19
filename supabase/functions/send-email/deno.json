@@ -1,0 +1,8 @@
+{
+  "imports": {
+    "nodemailer": "npm:nodemailer@9.0.0"
+  },
+  "compilerOptions": {
+    "strict": true
+  }
+}

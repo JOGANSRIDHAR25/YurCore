@@ -1,0 +1,16 @@
+{
+  "version": "5",
+  "specifiers": {
+    "npm:nodemailer@9.0.0": "9.0.0"
+  },
+  "npm": {
+    "nodemailer@9.0.0": {
+      "integrity": "sha512-tbPTid7d/p9jAA8CRZ3iomvrMaST0o6NYuY7v6JQZHpPRZ61mLFSPKYd7342NtOFuej9/+L48SOIxwfu2uDvtw=="
+    }
+  },
+  "workspace": {
+    "dependencies": [
+      "npm:nodemailer@9.0.0"
+    ]
+  }
+}
