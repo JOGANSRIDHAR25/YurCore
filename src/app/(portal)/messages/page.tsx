@@ -7,6 +7,7 @@ import { uploadChatAttachment } from "@/lib/chat-attachments";
 import type { PatientInboxThread, MessageRow } from "./type";
 import { setNavContext } from "@/lib/nav-context-client";
 import { useRealtimeSignal, useRealtimeTopics } from "@/hooks/use-realtime-signal";
+import { DoctorGroupedThreadList } from "./DoctorGroupedThreadList";
 
 // New messages arrive instantly via Realtime; polling is only a safety net.
 const INBOX_POLL_MS = 60000;
@@ -58,6 +59,7 @@ export default function MessagesPage() {
   const [inboxLoading, setInboxLoading] = useState(true);
   const [messages, setMessages] = useState<MessageRow[]>([]);
 
+  // Stable per doctor + patient, so the open chat survives inbox refreshes and new consultations.
   const [activeId, setActiveId] = useState<string | null>(null);
   const [inputText, setInputText] = useState("");
   const [sending, setSending] = useState(false);
@@ -82,37 +84,42 @@ export default function MessagesPage() {
     return () => clearInterval(interval);
   }, [loadInbox]);
 
+  // Latest values for callbacks: any consultation of the pair loads the whole conversation,
+  // and a new consultation must not reset the open chat.
+  const activeIdRef = useRef<string | null>(null);
+  activeIdRef.current = activeId;
   const activeConsultationRef = useRef<string | null>(null);
   activeConsultationRef.current = activeThread?.consultationId ?? null;
 
-  const loadMessages = useCallback(async (consultationId: string) => {
+  const loadMessages = useCallback(async (threadId: string, consultationId: string) => {
     try {
       const data = await fetchMessages(consultationId);
       // A late response for a thread the user already left must not replace the open one.
-      if (activeConsultationRef.current && activeConsultationRef.current !== consultationId) return;
+      if (activeIdRef.current !== threadId) return;
       setMessages(data);
     } catch (err) {
       console.error("Failed to load messages:", err);
     }
   }, []);
 
+  const hasActiveThread = Boolean(activeThread);
   useEffect(() => {
-    if (!activeThread?.consultationId) {
-      setMessages([]);
-      return;
-    }
     setMessages([]);
-    void loadMessages(activeThread.consultationId);
-    const interval = setInterval(() => loadMessages(activeThread.consultationId), THREAD_POLL_MS);
+    if (!activeId || !hasActiveThread) return;
+    const load = () => {
+      if (activeConsultationRef.current) void loadMessages(activeId, activeConsultationRef.current);
+    };
+    load();
+    const interval = setInterval(load, THREAD_POLL_MS);
     return () => clearInterval(interval);
-  }, [activeThread?.consultationId, loadMessages]);
+  }, [activeId, hasActiveThread, loadMessages]);
 
   const { inbox: inboxTopic } = useRealtimeTopics();
   useRealtimeSignal(
     inboxTopic,
     useCallback(() => {
       void loadInbox();
-      if (activeConsultationRef.current) void loadMessages(activeConsultationRef.current);
+      if (activeIdRef.current && activeConsultationRef.current) void loadMessages(activeIdRef.current, activeConsultationRef.current);
     }, [loadInbox, loadMessages])
   );
 
@@ -121,10 +128,11 @@ export default function MessagesPage() {
     if ((!inputText.trim() && !file) || !activeThread || sending) return false;
     const content = inputText.trim();
     const consultationId = activeThread.consultationId;
+    const threadId = activeThread.id;
     setSendError(null);
 
     // Refresh the thread and the inbox together once the server has the message.
-    const refresh = () => Promise.all([loadMessages(consultationId), loadInbox()]);
+    const refresh = () => Promise.all([loadMessages(threadId, consultationId), loadInbox()]);
 
     if (!file) {
       // Text: show it instantly and let the user keep typing while it sends.
@@ -186,13 +194,11 @@ export default function MessagesPage() {
     lastMessageTime: t.lastMessageTime,
     unread: t.unread,
     unreadCount: t.unreadCount,
-    // Family members share this inbox — label whose conversation it is.
-    ...(t.isFamilyMember
-      ? {
-          tag: `For ${t.patientName}`,
-          headerContext: `About ${t.patientName}${t.relationship ? ` (${t.relationship})` : ""} · family member`,
-        }
-      : {}),
+    // Family members share this inbox — the header names whose conversation it is.
+    subject: {
+      name: t.patientName,
+      detail: t.isFamilyMember ? `Family member${t.relationship ? ` · ${t.relationship}` : ""}` : "You",
+    },
   }));
 
   const chatMessages: ChatMessage[] = messages.map((m) => ({
@@ -237,6 +243,14 @@ export default function MessagesPage() {
             : "Visible to your doctor in their practitioner portal"
         }
         statusLine="Encrypted · ABDM compliant"
+        renderThreadList={(search) => (
+          <DoctorGroupedThreadList
+            threads={threads}
+            search={search}
+            activeId={activeId}
+            onSelect={(id) => setActiveId(id)}
+          />
+        )}
       />
     </div>
   );

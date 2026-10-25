@@ -735,9 +735,24 @@ export class ConsultationRepository {
     // family.repo.ts, so it's read the same way as a self-registered patient.
     const { data: familyMember } = await supabase
       .from("family_members")
-      .select("relationship, phone")
+      .select("relationship, phone, owner_patient_id")
       .eq("patient_id", cleanId)
       .maybeSingle();
+
+    // A family member without an address of their own defaults to the address of
+    // the account owner who created their profile.
+    let ownerAddress: string | null = null;
+    if (familyMember?.owner_patient_id && !dbProfile?.address && !dbPat.address) {
+      const { data: owner } = await supabase
+        .from("patients")
+        .select("address, user_id")
+        .eq("id", familyMember.owner_patient_id)
+        .maybeSingle();
+      const { data: ownerProfile } = owner?.user_id
+        ? await supabase.from("patient_profiles").select("address").eq("user_id", owner.user_id).maybeSingle()
+        : { data: null };
+      ownerAddress = ownerProfile?.address || owner?.address || null;
+    }
 
     const dob = dbPat.date_of_birth;
     let age = 0;
@@ -763,7 +778,7 @@ export class ConsultationRepository {
       height: dbProfile?.height || dbPat.height || null,
       weight: dbProfile?.weight || dbPat.weight || null,
       bloodGroup: dbProfile?.blood_group || dbPat.blood_group || "",
-      address: dbProfile?.address || dbPat.address || "Bangalore, India",
+      address: dbProfile?.address || dbPat.address || ownerAddress || "",
     };
 
     // 4. Fetch Consultations, EMR Notes, and Prescriptions

@@ -833,8 +833,10 @@ export class AppointmentsRepository {
         status: "scheduled",
         reason_for_visit: reasonForVisit?.trim() || null,
 
-        video_provider: "jitsi",
-        video_status: "not_started",
+        // Only a video consultation has a call room; in-clinic visits keep the column defaults.
+        ...(mode === "video"
+          ? { video_provider: "jitsi", video_status: "not_started" }
+          : {}),
       })
       .select("id")
       .single();

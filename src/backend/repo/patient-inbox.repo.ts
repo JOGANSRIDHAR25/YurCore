@@ -1,33 +1,7 @@
 import { createClient } from "@/shared/db/supabase.server";
+import { mergeInboxThreads, type InboxConsultationRow, type MergedInboxThread } from "./patient-inbox.merge";
 
-export type PatientInboxThread = {
-  id: string;
-  practitionerId: string;
-  doctorName: string;
-  doctorInitials: string;
-  lastMessage: string;
-  lastMessageTime: string;
-  unread: boolean;
-  unreadCount: number;
-  consultationId: string;
-  /** Who the conversation is about — the account owner or one of their family members. */
-  patientId: string;
-  patientName: string;
-  isFamilyMember: boolean;
-  relationship?: string;
-};
-
-function timeAgo(dateStr: string): string {
-  const diff = Date.now() - new Date(dateStr).getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return "Just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  if (days < 7) return `${days}d ago`;
-  return new Date(dateStr).toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
-}
+export type PatientInboxThread = MergedInboxThread;
 
 export class PatientInboxRepository {
   static async getPatientIdFromUserId(userId: string): Promise<string | null> {
@@ -80,49 +54,12 @@ export class PatientInboxRepository {
       throw new Error("Failed to fetch inbox from database");
     }
 
-    return (consults ?? [])
-      .map((c: any) => {
-        const msgs = (c.messages ?? []).sort((a: any, b: any) =>
-          new Date(b.sent_at).getTime() - new Date(a.sent_at).getTime()
-        );
-        const last = msgs[0];
-        const name = c.practitioner?.full_name ?? "Doctor";
-        const sortTime = last?.sent_at ?? c.created_at;
-        const unreadCount = msgs.filter((m: any) => m.direction === "doctor_to_patient" && !m.read_at).length;
-        const family = familyByPatientId.get(c.patient_id);
-        return {
-          id: c.id,
-          practitionerId: c.practitioner_id,
-          doctorName: name,
-          doctorInitials: name.split(" ").filter((w: string) => w).map((w: string) => w[0]).join("").slice(0, 2).toUpperCase(),
-          lastMessage: last
-            ? last.content || (last.attachment_path ? (String(last.attachment_type).startsWith("image/") ? "Photo" : "Document") : "")
-            : "Start the conversation",
-          lastMessageTime: sortTime ? timeAgo(sortTime) : "",
-          unread: unreadCount > 0,
-          unreadCount,
-          consultationId: c.id,
-          patientId: c.patient_id,
-          patientName: family?.name ?? ownerRow?.full_name ?? "You",
-          isFamilyMember: Boolean(family),
-          relationship: family?.relationship,
-          _sortTime: sortTime,
-        };
-      })
-      .sort((a: any, b: any) => new Date(b._sortTime).getTime() - new Date(a._sortTime).getTime())
-      // One thread per practitioner per person: several consultations with the
-      // same doctor about the same patient are one conversation. Rows are
-      // sorted newest-first, so the first row seen is the latest consultation.
-      .reduce((acc: any[], t: any) => {
-        const existing = acc.find((x) => x.practitionerId === t.practitionerId && x.patientId === t.patientId);
-        if (existing) {
-          existing.unreadCount += t.unreadCount;
-          existing.unread = existing.unreadCount > 0;
-        } else {
-          acc.push(t);
-        }
-        return acc;
-      }, [])
-      .map(({ _sortTime, ...thread }: any) => thread);
+    // One conversation per doctor per person, previewed by its latest message.
+    return mergeInboxThreads((consults ?? []) as unknown as InboxConsultationRow[], (pid) => {
+      const family = familyByPatientId.get(pid);
+      return family
+        ? { name: family.name, isFamilyMember: true, relationship: family.relationship }
+        : { name: ownerRow?.full_name ?? "You", isFamilyMember: false };
+    });
   }
 }

@@ -632,7 +632,7 @@ function PrescriptionsContent() {
                   </div>
                   <div>
                     <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Address</p>
-                    <p className="font-semibold text-slate-800 mt-0.5 truncate" title={activeRx?._raw?.address || activePatient?.phone}>{activeRx?._raw?.address || "Bangalore, India"}</p>
+                    <p className="font-semibold text-slate-800 mt-0.5 truncate" title={activeRx?._raw?.address || activePatient?.phone}>{activeRx?._raw?.address || "—"}</p>
                   </div>
                 </div>
               </div>

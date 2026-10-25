@@ -127,7 +127,7 @@ function RecordsPageContent() {
         age: profile?.age || null,
         gender: profile?.gender || null,
         phone: profile?.phone || null,
-        address: ((profile as any)?.address as string | undefined) || "Bangalore, India",
+        address: ((profile as any)?.address as string | undefined) || "—",
       };
 
   const [detailedRecords, setDetailedRecords] = useState<any[]>([]);

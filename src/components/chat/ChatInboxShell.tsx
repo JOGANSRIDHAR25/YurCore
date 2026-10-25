@@ -16,6 +16,8 @@ export type ChatThread = {
   tag?: string;
   /** Replaces the status line in the conversation header for this thread. */
   headerContext?: string;
+  /** Opt-in: who the conversation is about, shown in the header as "Conversation for: …". */
+  subject?: { name: string; detail?: string };
 };
 
 export type ChatMessage = {
@@ -52,6 +54,12 @@ interface ChatInboxShellProps {
   allowAttachments?: boolean;
   enableReply?: boolean;
   onReact?: (messageId: string, emoji: string) => void;
+  /**
+   * Opt-in: renders the thread list instead of the default flat list (used by the patient
+   * inbox to group by doctor). Receives the current search text. Loading and the
+   * no-conversations state are still handled here.
+   */
+  renderThreadList?: (search: string) => React.ReactNode;
 }
 
 const REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "🙏", "😢"];
@@ -78,6 +86,7 @@ export function ChatInboxShell({
   allowAttachments = true,
   enableReply = false,
   onReact,
+  renderThreadList,
 }: ChatInboxShellProps) {
   const [search, setSearch] = useState("");
   const [file, setFile] = useState<File | null>(null);
@@ -167,6 +176,8 @@ export function ChatInboxShell({
               <p className="text-sm font-semibold text-foreground">{emptyThreadsTitle}</p>
               <p className="text-xs text-muted-foreground mt-1.5 leading-relaxed">{emptyThreadsSubtitle}</p>
             </div>
+          ) : renderThreadList ? (
+            renderThreadList(search)
           ) : filteredThreads.length === 0 ? (
             <div className="px-6 py-10 text-center text-xs text-muted-foreground">No matches for "{search}"</div>
           ) : (
@@ -247,7 +258,15 @@ export function ChatInboxShell({
                     </span>
                   )}
                 </div>
-                <p className="text-[10.5px] text-muted-foreground truncate">{activeThread.headerContext ?? statusLine}</p>
+                {activeThread.subject ? (
+                  <p className="text-[11.5px] text-foreground/80 truncate mt-0.5">
+                    <span className="text-muted-foreground">Conversation for: </span>
+                    <span className="font-semibold text-foreground">{activeThread.subject.name}</span>
+                    {activeThread.subject.detail && <span className="text-muted-foreground"> · {activeThread.subject.detail}</span>}
+                  </p>
+                ) : (
+                  <p className="text-[10.5px] text-muted-foreground truncate">{activeThread.headerContext ?? statusLine}</p>
+                )}
               </div>
             </div>
 

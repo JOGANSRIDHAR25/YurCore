@@ -366,9 +366,16 @@ class form_schema {
                     $put($name, is_scalar($v) ? (string)$v : '');
             }
         }
-        // Like a browser, never submit fields that Moodle's rules disable or hide (disabledIf / hideIf).
+        // Like a browser, never submit new values for fields that Moodle's rules disable (disabledIf). Fields
+        // hidden by hideIf are still submitted by a browser, so they are kept. A disabled field of an existing
+        // activity keeps its stored value: some modules write it back unconditionally on update (e.g. assign's
+        // requireallteammemberssubmit, which is NOT NULL and disabled while submissiondrafts is off).
+        $simple = ['select', 'text', 'number', 'textarea'];
         for ($pass = 0; $pass < 3; $pass++) {
             foreach ($rules as $r) {
+                if ($r['kind'] !== 'disable') {
+                    continue;
+                }
                 $v = $raw[$r['on']] ?? null;
                 $vs = is_array($v) ? '' : (string)$v;
                 $active = match ($r['cond']) {
@@ -381,7 +388,13 @@ class form_schema {
                 };
                 if ($active) {
                     foreach ($r['targets'] as $t) {
-                        unset($raw[$t]);
+                        $stored = $data->$t ?? null;
+                        $el = $flat[$t] ?? null;
+                        if ($el && empty($el['sub']) && in_array($el['type'], $simple, true) && is_scalar($stored)) {
+                            $raw[$t] = (string)$stored;
+                        } else {
+                            unset($raw[$t]);
+                        }
                     }
                 }
             }

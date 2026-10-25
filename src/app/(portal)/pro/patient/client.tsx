@@ -102,7 +102,7 @@ async function saveCompleteConsultation(payload: Record<string, unknown>): Promi
 import {
   User, Activity, Syringe, Heart, Fingerprint, Calendar, Phone,
   MapPin, Stethoscope, Droplets, Thermometer, Weight, Flame,
-  FileText, ArrowUpCircle, Plus, Trash2, FileUp, Save, History, Clock,
+  FileText, ArrowUpCircle, Plus, Trash2, FileUp, Save, History, Clock, Video, Building2,
   ChevronRight, Banknote, Wallet
 } from "lucide-react";
 
@@ -261,6 +261,51 @@ const SectionCard = ({ title, icon: Icon, children }: { title: string, icon: any
 
 type PatientNavContext = { patientId: string; appointmentId?: string };
 
+type ConsultationDraft = {
+  savedAt: string;
+  height: number | "";
+  weight: number | "";
+  bloodGroup: string;
+  address: string;
+  visitReason: string;
+  chiefComplaints: string[];
+  presentIllness: string;
+  previousHistory: string;
+  previousCalls: string;
+  vitals: { bpSys: string; bpDia: string; pulse: string; temp: string; spo2: string; weight: string; bmi: string };
+  medicines: { id: number; name: string; form: string; dose: string; frequency: string; timing: string; duration: string; instructions: string }[];
+  noPrescription: boolean;
+  prescriptionNotes: string;
+  followUpInstructions: string;
+  paymentMethod: "cash" | "online";
+  upcomingCallDate: string;
+  upcomingCallTime: string;
+  upcomingCallSlotId: string;
+  upcomingCallMode: "video" | "clinic" | "";
+  followUpAppointmentId: string;
+};
+
+const LEGACY_PLACEHOLDER_ADDRESS = "Bangalore, India";
+
+function readConsultationDraft(key: string): ConsultationDraft | null {
+  if (!key) return null;
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as ConsultationDraft) : null;
+  } catch {
+    return null;
+  }
+}
+
+function clearConsultationDraft(key: string) {
+  if (!key) return;
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Storage unavailable: nothing to clear.
+  }
+}
+
 export default function PatientIntakeClient() {
   const router = useRouter();
   const { user } = useAuth();
@@ -285,6 +330,9 @@ export default function PatientIntakeClient() {
 
   const id = navContext?.patientId ?? "";
   const appointmentId = navContext?.appointmentId;
+  // Drafts are kept per practitioner, patient and appointment, in this browser only.
+  const draftOwner = user?.id || user?.phone || "";
+  const draftKey = draftOwner && id ? `yurcore:consultation-draft:${draftOwner}:${id}:${appointmentId ?? ""}` : "";
 
   const { data: intakeData, loading: isLoading, error } = usePatientIntakeDetails(id, appointmentId);
   const patient = intakeData?.patient;
@@ -365,7 +413,8 @@ export default function PatientIntakeClient() {
   const [calendarYear, setCalendarYear] = useState(new Date().getFullYear());
   const [selectedCalendarDate, setSelectedCalendarDate] = useState("");
   const [showCalendarPanel, setShowCalendarPanel] = useState(false);
-  const [upcomingCallMode, setUpcomingCallMode] = useState<"video" | "clinic">("video");
+  // Chosen explicitly by the practitioner for each follow-up slot; "" until they pick one.
+  const [upcomingCallMode, setUpcomingCallMode] = useState<"video" | "clinic" | "">("");
 
   const { data: myPractitionerIdRaw } = useMyPractitionerId(user?.id);
   const myPractitionerId = myPractitionerIdRaw ?? undefined;
@@ -490,7 +539,7 @@ export default function PatientIntakeClient() {
   const [hasInitialized, setHasInitialized] = useState(false);
 
   useEffect(() => {
-    if (intakeData && !hasInitialized) {
+    if (intakeData && !hasInitialized && draftKey) {
       const pat = intakeData.patient;
       const latestVisit = intakeData.visits?.[0] as any;
 
@@ -559,9 +608,86 @@ export default function PatientIntakeClient() {
           }
         }
       }
+
+      // A saved draft wins over the last visit's values.
+      const draft = readConsultationDraft(draftKey);
+      if (draft) {
+        setHeight(draft.height);
+        setWeight(draft.weight);
+        setBloodGroup(draft.bloodGroup);
+        // Drafts saved before family members inherited their owner's address may hold
+        // the old hard-coded placeholder; the freshly loaded address wins over it.
+        if (draft.address !== LEGACY_PLACEHOLDER_ADDRESS) setAddress(draft.address);
+        setVisitReason(draft.visitReason);
+        setChiefComplaints(draft.chiefComplaints);
+        setPresentIllness(draft.presentIllness);
+        setPreviousHistory(draft.previousHistory);
+        setPreviousCalls(draft.previousCalls);
+        setVitals(draft.vitals);
+        setMedicines(draft.medicines);
+        setNoPrescription(draft.noPrescription);
+        setPrescriptionNotes(draft.prescriptionNotes);
+        if (editorRef.current) editorRef.current.innerHTML = draft.prescriptionNotes;
+        setFollowUpInstructions(draft.followUpInstructions);
+        setPaymentMethod(draft.paymentMethod);
+        if (draft.upcomingCallDate && draft.upcomingCallTime) {
+          setUpcomingCallDate(draft.upcomingCallDate);
+          setUpcomingCallTime(draft.upcomingCallTime);
+          setUpcomingCallSlotId(draft.upcomingCallSlotId);
+          setUpcomingCallMode(draft.upcomingCallMode);
+          setFollowUpAppointmentId(draft.followUpAppointmentId);
+          setIsUpcomingVisible(true);
+        }
+        toast(`Draft from ${new Date(draft.savedAt).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })} restored`);
+      }
       setHasInitialized(true);
     }
-  }, [intakeData, hasInitialized]);
+  }, [intakeData, hasInitialized, draftKey]);
+
+  // Shown next to the Save Draft button.
+  const [draftStatus, setDraftStatus] = useState<{ ok: boolean; text: string } | null>(null);
+  const [hasDraft, setHasDraft] = useState(false);
+  useEffect(() => {
+    if (hasInitialized) setHasDraft(Boolean(readConsultationDraft(draftKey)));
+  }, [hasInitialized, draftKey]);
+
+  // Drops the saved draft and reloads the form from the patient's current details.
+  const handleDiscardDraft = () => {
+    clearConsultationDraft(draftKey);
+    setHasDraft(false);
+    setDraftStatus({ ok: true, text: "Draft discarded" });
+    setHasInitialized(false);
+  };
+
+  const handleSaveDraft = () => {
+    if (!draftKey) {
+      setDraftStatus({ ok: false, text: "Session still loading. Try again in a moment." });
+      return;
+    }
+    const draft: ConsultationDraft = {
+      savedAt: new Date().toISOString(),
+      height, weight, bloodGroup, address,
+      visitReason, chiefComplaints, presentIllness, previousHistory, previousCalls,
+      vitals, medicines, noPrescription,
+      prescriptionNotes: editorRef.current?.innerHTML ?? prescriptionNotes,
+      followUpInstructions, paymentMethod,
+      upcomingCallDate, upcomingCallTime, upcomingCallSlotId, upcomingCallMode, followUpAppointmentId,
+    };
+    try {
+      localStorage.setItem(draftKey, JSON.stringify(draft));
+    } catch {
+      setDraftStatus({ ok: false, text: "Could not save the draft in this browser." });
+      return;
+    }
+    const time = new Date().toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" });
+    setHasDraft(true);
+    setDraftStatus({
+      ok: true,
+      text: uploadedFiles.length
+        ? `Draft saved at ${time}. Attach reports again before saving.`
+        : `Draft saved at ${time}`,
+    });
+  };
 
   const handleAddMedicine = () => {
     setMedicines([...medicines, { id: Date.now(), name: "", form: "Tablet", dose: "", frequency: "Morning", timing: "After Food", duration: "", instructions: "" }]);
@@ -630,7 +756,7 @@ export default function PatientIntakeClient() {
           : followUpInstructions,
         upcomingCallDate: upcomingCallDate || undefined,
         upcomingCallTime: upcomingCallTime || undefined,
-        upcomingCallMode: upcomingCallDate && upcomingCallTime ? upcomingCallMode : undefined,
+        upcomingCallMode: upcomingCallDate && upcomingCallTime && upcomingCallMode ? upcomingCallMode : undefined,
         reportUrls,
         reportNames
       };
@@ -638,6 +764,7 @@ export default function PatientIntakeClient() {
       const result = await saveCompleteConsultation(consultationData);
 
       if (result.success) {
+        clearConsultationDraft(draftKey);
         setIsSaved(true);
         setTimeout(async () => {
           await setNavContext("prescriptions", { patientId: patient?.id || id });
@@ -1151,8 +1278,15 @@ export default function PatientIntakeClient() {
                       <div>
                         <p className="text-xs font-bold text-emerald-800">Selected Scheduled Slot</p>
                         <p className="text-xs text-emerald-700 font-semibold mt-0.5">
-                          {new Date(upcomingCallDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })} at {upcomingCallTime} ({upcomingCallMode === 'video' ? '📹 Video' : '🏥 Clinic'})
+                          {new Date(upcomingCallDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })} at {upcomingCallTime}
+                          {upcomingCallMode === "video" ? " (📹 Video consultation)" : upcomingCallMode === "clinic" ? " (🏥 In clinic / In person)" : ""}
                         </p>
+                        {!followUpAppointmentId && !upcomingCallSlotId && (
+                          <p className="text-[11px] text-amber-700 font-semibold mt-0.5">From an earlier visit. Click "Change Date/Slot" and pick a slot to schedule it.</p>
+                        )}
+                        {!followUpAppointmentId && upcomingCallSlotId && !upcomingCallMode && (
+                          <p className="text-[11px] text-amber-700 font-semibold mt-0.5">Choose the consultation type below the time slots.</p>
+                        )}
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
@@ -1163,9 +1297,9 @@ export default function PatientIntakeClient() {
                       ) : (
                         <button
                           type="button"
-                          disabled={isBookingFollowUp || !upcomingCallSlotId}
+                          disabled={isBookingFollowUp || !upcomingCallSlotId || !upcomingCallMode}
                           onClick={async () => {
-                            if (!upcomingCallSlotId || !id) return;
+                            if (!upcomingCallSlotId || !upcomingCallMode || !id) return;
 
                             setIsBookingFollowUp(true);
 
@@ -1207,6 +1341,7 @@ export default function PatientIntakeClient() {
                           setUpcomingCallDate("");
                           setUpcomingCallTime("");
                           setUpcomingCallSlotId("");
+                          setUpcomingCallMode("");
                           setFollowUpAppointmentId("");
                           setShowCalendarPanel(false);
                         }}
@@ -1346,9 +1481,9 @@ export default function PatientIntakeClient() {
                                     setUpcomingCallDate(selectedDate);
                                     setUpcomingCallTime(slot.startTime);
                                     setUpcomingCallSlotId(slot.id);
-                                    setUpcomingCallMode(slotModes[0]);
+                                    // The practitioner picks video or in-person below; nothing is preselected.
+                                    setUpcomingCallMode("");
                                     setFollowUpAppointmentId("");
-                                    setShowCalendarPanel(false);
                                   }}
                                   className={cn(
                                     "text-xs px-3 py-2.5 rounded-xl border transition-all duration-200 cursor-pointer active:scale-95 text-center flex flex-col items-center justify-center gap-1",
@@ -1368,6 +1503,42 @@ export default function PatientIntakeClient() {
                                 </button>
                               );
                             })}
+                          </div>
+                        )}
+
+                        {/* Consultation type for the chosen slot */}
+                        {upcomingCallSlotId && upcomingCallDate === selectedDate && !followUpAppointmentId && (
+                          <div className="mt-4 pt-4 border-t border-gray-100">
+                            <span className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">
+                              Consultation type for {upcomingCallTime}
+                            </span>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2" role="radiogroup" aria-label="Consultation type">
+                              {([
+                                { value: "video", label: "Video consultation", icon: Video },
+                                { value: "clinic", label: "In clinic / In person", icon: Building2 },
+                              ] as const).map(({ value, label, icon: Icon }) => (
+                                <label
+                                  key={value}
+                                  className={cn(
+                                    "flex items-center gap-2.5 px-3 py-2.5 rounded-xl border-2 cursor-pointer transition-all text-xs font-bold",
+                                    upcomingCallMode === value
+                                      ? "border-indigo-500 bg-indigo-50 text-indigo-800"
+                                      : "border-gray-200 hover:border-gray-300 text-gray-700"
+                                  )}
+                                >
+                                  <input
+                                    type="radio"
+                                    name="upcomingCallMode"
+                                    value={value}
+                                    checked={upcomingCallMode === value}
+                                    onChange={() => setUpcomingCallMode(value)}
+                                    className="accent-indigo-600"
+                                  />
+                                  <Icon className="w-4 h-4" />
+                                  {label}
+                                </label>
+                              ))}
+                            </div>
                           </div>
                         )}
                       </div>
@@ -1431,8 +1602,34 @@ export default function PatientIntakeClient() {
         </div>
 
         {/* Final Section: Save Consultation (Bottom scrolling position, not sticky) */}
-        <div className="flex justify-end gap-3 pt-4 pb-12">
-          <button className="flex items-center justify-center gap-2 bg-white hover:bg-gray-50 text-gray-700 font-semibold text-sm px-5 py-2.5 rounded-xl border border-gray-200 shadow-sm transition-all min-w-[120px]">
+        <div className="flex flex-wrap items-center justify-end gap-3 pt-4 pb-12">
+          {draftStatus && !isSaved && (
+            <span
+              role="status"
+              className={cn(
+                "text-sm font-semibold flex items-center gap-1.5",
+                draftStatus.ok ? "text-emerald-600" : "text-rose-600"
+              )}
+            >
+              {draftStatus.ok ? "✓" : "!"} {draftStatus.text}
+            </span>
+          )}
+          {hasDraft && !isSaved && (
+            <button
+              type="button"
+              onClick={handleDiscardDraft}
+              disabled={isSaving}
+              className="text-sm font-semibold text-gray-500 hover:text-rose-600 px-2 py-2.5 transition-colors disabled:opacity-50"
+            >
+              Discard draft
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={handleSaveDraft}
+            disabled={isSaving || isSaved}
+            className="flex items-center justify-center gap-2 bg-white hover:bg-gray-50 disabled:opacity-50 text-gray-700 font-semibold text-sm px-5 py-2.5 rounded-xl border border-gray-200 shadow-sm transition-all min-w-[120px]"
+          >
             Save Draft
           </button>
 
