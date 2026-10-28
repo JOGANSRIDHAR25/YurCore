@@ -4,9 +4,9 @@ import { AuthorizationError, NotFoundError, ValidationError } from "@/shared/api
 import type { AuthUser } from "@/shared/auth/auth.types";
 import { ROLES } from "@/shared/security/roles";
 import { isFileType, isQuizType } from "@/shared/learning/content";
-import type { AttemptResult, AttemptStart, ItemProgress, LearnerCourse, LearnerCourseDetails, LearnerState } from "@/shared/learning/types";
-import { LearningRepository, type AttemptRow, type ContentRow, type CourseRow, type QuizRow } from "../repo/learning.repo";
-import { UUID, buildSections, summaries } from "./learning-common";
+import type { AttemptResult, AttemptStart, ItemProgress, LearnerCourse, LearnerCourseCard, LearnerCourseDetails, LearnerCoursePage, LearnerState } from "@/shared/learning/types";
+import { LearningRepository, type AttemptRow, type ContentRow, type CourseCursor, type CourseRow, type QuizRow } from "../repo/learning.repo";
+import { FILE_URL_TTL, UUID, buildSections, summaries } from "./learning-common";
 import { LearningMoodleSync } from "./learning-moodle-sync.service";
 
 /**
@@ -24,6 +24,33 @@ export const attemptSubmitSchema = z.object({ answers: z.record(z.string().regex
 export const responseSchema = z.object({ text: z.string().trim().max(20000).default(""), rating: z.number().int().min(1).max(5).nullable().optional() });
 
 const expired = (a: AttemptRow, limit: number | null) => limit !== null && Date.now() > new Date(a.started_at).getTime() + limit * 60000 + GRACE_MS;
+
+/** Catalogue batch size ("Show more" loads this many at a time) and the most a client may ask for at once. */
+export const LIST_PAGE_SIZE = 12;
+export const LIST_PAGE_MAX = 48;
+
+/** The cursor is opaque to clients: base64url JSON of the last card's sort key. Anything malformed is rejected. */
+export function encodeCursor(c: CourseCursor): string {
+  return Buffer.from(JSON.stringify([c.publishedAt, c.id])).toString("base64url");
+}
+export function decodeCursor(raw: string | null | undefined): CourseCursor | null {
+  if (!raw) return null;
+  try {
+    const [publishedAt, id] = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as unknown[];
+    const validDate = publishedAt === null || (typeof publishedAt === "string" && publishedAt.length <= 40 && !Number.isNaN(Date.parse(publishedAt)) && /^[0-9T:.+\-Z ]+$/.test(publishedAt));
+    if (typeof id === "string" && UUID.test(id) && validDate) return { publishedAt: publishedAt as string | null, id };
+  } catch { /* fall through */ }
+  throw new ValidationError("Invalid page cursor");
+}
+
+/** Card text: whitespace collapsed and cut at a word boundary, so a long full description is not sent whole. */
+const SUMMARY_MAX = 220;
+function summarize(text: string | null | undefined): string {
+  const t = (text ?? "").replace(/\s+/g, " ").trim();
+  if (t.length <= SUMMARY_MAX) return t;
+  const cut = t.slice(0, SUMMARY_MAX);
+  return `${cut.slice(0, Math.max(cut.lastIndexOf(" "), SUMMARY_MAX - 40)).trimEnd()}…`;
+}
 
 export class LearningService {
   /** Only practitioners (not assistants/patients/admins) may use the learner experience. */
@@ -68,24 +95,54 @@ export class LearningService {
   }
 
   // ---------- queries ----------
-  static async list(user: AuthUser, scope: ScopeFilter, filters: { q?: string; category?: string }): Promise<LearnerCourse[]> {
+  /**
+   * One batch of the learner's catalogue. Filters (scope, search, category) are applied in the database before
+   * paging, and only the batch's courses get counts, progress, instructors and signed thumbnail URLs.
+   */
+  static async list(user: AuthUser, scope: ScopeFilter, filters: { q?: string; category?: string }, page: { limit?: number; cursor?: string | null } = {}): Promise<LearnerCoursePage> {
     await this.requirePractitioner(user);
+    const limit = Math.min(Math.max(Math.trunc(page.limit ?? LIST_PAGE_SIZE), 1), LIST_PAGE_MAX);
+    const cursor = decodeCursor(page.cursor);
     // Courses created or changed in Moodle are picked up in the background (at most every few minutes).
-    LearningMoodleSync.scheduleRefresh(null);
-    const enrollments = await LearningRepository.listEnrollments({ userId: user.id });
-    const rows = await LearningRepository.listCourses({ status: "published", ...(scope === "all" ? filters : { ids: enrollments.map((e) => e.course_id) }) });
-    const { list, content } = await summaries(rows);
-    const progress = await LearningRepository.listProgress({ userId: user.id, courseIds: rows.map((r) => r.id) });
-    const done = new Set(progress.map((p) => p.content_id));
+    if (!cursor) LearningMoodleSync.scheduleRefresh(null);
 
-    const out = list.map<LearnerCourse>((c) => {
-      const e = enrollments.find((x) => x.course_id === c.id);
-      const items = content.filter((x) => x.course_id === c.id);
-      const completed = items.filter((x) => done.has(x.id)).length;
+    const enrollments = await LearningRepository.listUserEnrollments(user.id);
+    const scoped = scope === "all" ? undefined : enrollments.filter((e) => scope === "mine" || e.completed_at).map((e) => e.course_id);
+    if (scoped && scoped.length === 0) return { items: [], nextCursor: null, hasMore: false, total: cursor ? null : 0 };
+
+    const { rows, hasMore, total } = await LearningRepository.listPublishedCoursePage({ ...filters, ids: scoped, cursor, limit, withTotal: !cursor });
+    const ids = rows.map((r) => r.id);
+    const [content, progress, instructors, thumbs] = await Promise.all([
+      LearningRepository.listContentIds(ids),
+      LearningRepository.listUserProgress(user.id, ids),
+      LearningRepository.getPractitioners([...new Set(rows.map((r) => r.instructor_id).filter((x): x is string => Boolean(x)))]),
+      LearningRepository.signedUrls(rows.map((r) => r.thumbnail_path ?? ""), FILE_URL_TTL).catch(() => new Map<string, string>()),
+    ]);
+    const done = new Set(progress.map((p) => p.content_id));
+    const enrolled = new Map(enrollments.map((e) => [e.course_id, e]));
+
+    const items = rows.map<LearnerCourseCard>((r) => {
+      const e = enrolled.get(r.id);
+      const own = content.filter((x) => x.course_id === r.id);
+      const completed = own.filter((x) => done.has(x.id)).length;
       const state: LearnerState = !e ? "not_started" : e.completed_at ? "completed" : "in_progress";
-      return { ...c, enrolled: Boolean(e), state, progress: e ? { completed, total: items.length, percent: items.length ? Math.round((completed / items.length) * 100) : 0 } : null };
+      return {
+        id: r.id,
+        title: r.title,
+        summary: summarize(r.short_description || r.description),
+        category: r.category_name,
+        level: r.level,
+        durationMinutes: r.duration_minutes,
+        items: own.length,
+        thumbnailUrl: r.thumbnail_path ? thumbs.get(r.thumbnail_path) ?? null : null,
+        instructorName: r.instructor_id ? instructors.get(r.instructor_id)?.full_name ?? null : null,
+        enrolled: Boolean(e),
+        state,
+        progress: e ? { completed, total: own.length, percent: own.length ? Math.round((completed / own.length) * 100) : 0 } : null,
+      };
     });
-    return scope === "completed" ? out.filter((c) => c.state === "completed") : out;
+    const last = rows.at(-1);
+    return { items, hasMore, nextCursor: hasMore && last ? encodeCursor({ publishedAt: last.published_at, id: last.id }) : null, total };
   }
 
   static async categories(user: AuthUser): Promise<string[]> {

@@ -55,6 +55,12 @@ export type OptionRow = { id: string; question_id: string; option_text: string; 
 export type QuestionRow = { id: string; quiz_id: string; question: string; explanation: string; position: number; options: OptionRow[] };
 
 export type EnrollmentRow = { id: string; course_id: string; user_id: string; started_at: string; completed_at: string | null };
+
+/** Only what a learner's course card needs (no objectives, sync or audit columns). */
+const CARD_COLUMNS = "id, title, short_description, description, category_name, level, duration_minutes, thumbnail_path, instructor_id, published_at";
+export type CourseCardRow = Pick<CourseRow, "id" | "title" | "short_description" | "description" | "category_name" | "level" | "duration_minutes" | "thumbnail_path" | "instructor_id" | "published_at">;
+/** Position after the last card of a page, in the catalogue order (published_at desc, nulls last, then id desc). */
+export type CourseCursor = { publishedAt: string | null; id: string };
 export type AttemptRow = { id: string; quiz_id: string; user_id: string; started_at: string; submitted_at: string | null; answers: Record<string, string>; correct_count: number | null; total_count: number | null; score_percent: number | null; passed: boolean | null };
 export type ResponseRow = { id: string; content_id: string; user_id: string; response_text: string; rating: number | null; submitted_at: string };
 
@@ -82,7 +88,18 @@ function check<T>(res: { data: T; error: { message: string } | null }, what: str
 }
 const now = () => new Date().toISOString();
 /** Strips PostgREST filter syntax from user text. */
-const term = (q: string) => q.replace(/[%,()*\\]/g, " ").trim();
+const term = (q: string) => q.replace(/[%,()*\\"]/g, " ").trim();
+
+/** PostgREST returns at most 1000 rows per request, so bounded-but-possibly-large reads are fetched in batches. */
+const BATCH = 1000;
+async function allRows<T>(page: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>, what: string): Promise<T[]> {
+  const out: T[] = [];
+  for (let from = 0; ; from += BATCH) {
+    const rows = check(await page(from, from + BATCH - 1), what) ?? [];
+    out.push(...rows);
+    if (rows.length < BATCH) return out;
+  }
+}
 
 export class LearningRepository {
   // ---- people ----
@@ -128,10 +145,48 @@ export class LearningRepository {
     return check(await query.order(order, { ascending: false, nullsFirst: false }), "course list") as CourseRow[];
   }
 
+  /**
+   * One page of the published catalogue, ordered by published_at desc (nulls last) then id desc, using keyset
+   * pagination: the next page starts strictly after `cursor`, so cards never repeat or shift when courses are
+   * published meanwhile. Reads `limit + 1` rows to know whether more exist. The total is counted only on request.
+   */
+  static async listPublishedCoursePage(opts: { q?: string; category?: string; ids?: string[]; cursor?: CourseCursor | null; limit: number; withTotal: boolean }): Promise<{ rows: CourseCardRow[]; hasMore: boolean; total: number | null }> {
+    let query = db().from(T.courses).select(CARD_COLUMNS, opts.withTotal ? { count: "exact" } : undefined).eq("status", "published");
+    if (opts.category) query = query.eq("category_name", opts.category);
+    if (opts.ids) query = query.in("id", opts.ids.length ? opts.ids : ["00000000-0000-0000-0000-000000000000"]);
+    const t = opts.q ? term(opts.q) : "";
+    if (t) query = query.or(`title.ilike.%${t}%,short_description.ilike.%${t}%,description.ilike.%${t}%`);
+    const c = opts.cursor;
+    if (c?.publishedAt) query = query.or(`published_at.lt."${c.publishedAt}",and(published_at.eq."${c.publishedAt}",id.lt.${c.id}),published_at.is.null`);
+    else if (c) query = query.is("published_at", null).lt("id", c.id);
+    const res = await query.order("published_at", { ascending: false, nullsFirst: false }).order("id", { ascending: false }).limit(opts.limit + 1);
+    const rows = check(res, "course page") as unknown as CourseCardRow[];
+    return { rows: rows.slice(0, opts.limit), hasMore: rows.length > opts.limit, total: opts.withTotal ? res.count ?? null : null };
+  }
+
+  /** id + course of every content item of the given courses (for item counts and progress totals). */
+  static async listContentIds(courseIds: string[]): Promise<{ id: string; course_id: string }[]> {
+    if (courseIds.length === 0) return [];
+    return allRows((from, to) => db().from(T.content).select("id, course_id").in("course_id", courseIds).order("id").range(from, to), "content ids");
+  }
+
+  /** The learner's completed items in the given courses. */
+  static async listUserProgress(userId: string, courseIds: string[]): Promise<{ course_id: string; content_id: string }[]> {
+    if (courseIds.length === 0) return [];
+    return allRows((from, to) => db().from(T.progress).select("course_id, content_id").eq("user_id", userId).in("course_id", courseIds).order("content_id").range(from, to), "progress list");
+  }
+
+  /** All of a learner's enrollments (their own rows only). */
+  static async listUserEnrollments(userId: string): Promise<Pick<EnrollmentRow, "course_id" | "completed_at">[]> {
+    return allRows((from, to) => db().from(T.enrollments).select("course_id, completed_at").eq("user_id", userId).order("course_id").range(from, to), "enrollment list");
+  }
+
   static async categories(publishedOnly: boolean): Promise<string[]> {
-    let query = db().from(T.courses).select("category_name").not("category_name", "is", null);
-    if (publishedOnly) query = query.eq("status", "published");
-    const rows = check(await query, "category list") as { category_name: string }[];
+    const rows = await allRows<{ category_name: string }>((from, to) => {
+      let query = db().from(T.courses).select("category_name").not("category_name", "is", null);
+      if (publishedOnly) query = query.eq("status", "published");
+      return query.order("id").range(from, to);
+    }, "category list");
     return [...new Set(rows.map((r) => r.category_name.trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
   }
 

@@ -352,13 +352,14 @@ export async function refresh(req: NextRequest) {
   const newAccessToken = await signAccessToken(tokenPayload);
   const newRefreshToken = await signRefreshToken(tokenPayload);
 
-  // Set new cookies
+  // Set new cookies (same lifetimes as login)
+  const isDev = process.env.NODE_ENV !== "production";
   cookieStore.set("access_token", newAccessToken, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
     path: "/",
-    maxAge: 15 * 60, // 15 minutes
+    maxAge: isDev ? 7 * 24 * 60 * 60 : 15 * 60,
   });
 
   cookieStore.set("refresh_token", newRefreshToken, {

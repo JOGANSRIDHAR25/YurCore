@@ -16,16 +16,12 @@ interface ErrorResponse {
 }
 
 function getBaseUrl(requestHeaders: Headers): string {
-  const configuredUrl = process.env.NEXT_PUBLIC_APP_URL;
-
-  if (configuredUrl) {
-    return configuredUrl;
-  }
-
+  // Prefer the host this request actually arrived on, so calls go back to the
+  // same server even when dev picks a different port than NEXT_PUBLIC_APP_URL.
   const host = requestHeaders.get("host");
 
   if (!host) {
-    return "http://localhost:3000";
+    return process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
   }
 
   const protocol =

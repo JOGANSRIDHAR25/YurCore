@@ -3,8 +3,8 @@ import { describe, it, expect, vi } from "vitest";
 vi.mock("server-only", () => ({}));
 vi.mock("@/shared/db/supabase.server", () => ({ createClient: () => { throw new Error("db must not be reached"); } }));
 
-import { LearningAdminService, contentInputSchema, courseInputSchema, layoutSchema, publishProblems, questionInputSchema, uploadRequestSchema } from "@/backend/service/learning-admin.service";
-import { LearningService, grade } from "@/backend/service/learning.service";
+import { LearningAdminService, contentInputSchema, contentUpdateSchema, courseInputSchema, courseUpdateSchema, layoutSchema, sectionUpdateSchema, publishProblems, questionInputSchema, uploadRequestSchema } from "@/backend/service/learning-admin.service";
+import { LearningService, decodeCursor, encodeCursor, grade } from "@/backend/service/learning.service";
 import { allowedFor, resolveMime } from "@/shared/learning/content";
 import type { AuthUser } from "@/shared/auth/auth.types";
 
@@ -70,6 +70,27 @@ describe("YurCore Learning validation", () => {
     expect(contentInputSchema.safeParse({ sectionId: ID, type: "podcast", title: "x" }).success).toBe(false);
     expect(contentInputSchema.safeParse({ sectionId: ID, type: "quiz", title: "Quiz", quiz: { passingScore: 70, questions: [q(2)] } }).success).toBe(true);
     expect(layoutSchema.safeParse({ sections: [{ id: ID, items: ["x"] }] }).success).toBe(false);
+  });
+
+  it("round-trips catalogue cursors and rejects tampered ones", () => {
+    const c = { publishedAt: "2026-10-27T16:06:14.646+00:00", id: ID };
+    expect(decodeCursor(encodeCursor(c))).toEqual(c);
+    expect(decodeCursor(encodeCursor({ publishedAt: null, id: ID }))).toEqual({ publishedAt: null, id: ID });
+    expect(decodeCursor(null)).toBeNull();
+    const bad = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64url");
+    expect(() => decodeCursor("not-base64-json")).toThrow();
+    expect(() => decodeCursor(bad(["2026-10-27", "not-a-uuid"]))).toThrow();
+    expect(() => decodeCursor(bad(['2026-10-27",id.gt.0', ID]))).toThrow(); // filter injection attempt
+  });
+
+  it("partial updates leave omitted fields out instead of resetting them to defaults", () => {
+    // e.g. the course form saves a new thumbnail on its own after creating the course
+    expect(courseUpdateSchema.parse({ thumbnailPath: "courses/x/thumbnail/a.jpg" })).toEqual({ thumbnailPath: "courses/x/thumbnail/a.jpg" });
+    expect(sectionUpdateSchema.parse({ title: "Renamed" })).toEqual({ title: "Renamed" });
+    expect(contentUpdateSchema.parse({ title: "Renamed" })).toEqual({ title: "Renamed" });
+    // creating still fills the defaults
+    expect(courseInputSchema.parse({ title: "Ayurveda basics" })).toMatchObject({ shortDescription: "", description: "", learningObjectives: [] });
+    expect(contentInputSchema.parse({ sectionId: ID, type: "feedback", title: "Feedback" })).toMatchObject({ description: "", settings: {} });
   });
 
   it("has no count or size cap on uploads, only file-type rules", () => {

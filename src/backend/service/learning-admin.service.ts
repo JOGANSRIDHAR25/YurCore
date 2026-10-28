@@ -22,20 +22,30 @@ import { LearningMoodleSync, toHtml } from "./learning-moodle-sync.service";
 // ---------- input schemas ----------
 const text = (max: number) => z.string().trim().max(max);
 
-export const courseInputSchema = z.object({
+// Update schemas are built from these default-free shapes: in Zod 4 a `.default()` still fires inside
+// `.partial()`, so a partial update (e.g. only a new thumbnail) would otherwise blank omitted fields.
+const courseFields = {
   title: z.string().trim().min(3, "Course title must be at least 3 characters").max(200),
-  shortDescription: text(300).default(""),
-  description: text(20000).default(""),
+  shortDescription: text(300),
+  description: text(20000),
   category: text(80).nullable().optional(),
   level: z.enum(["beginner", "intermediate", "advanced"]).nullable().optional(),
   instructorId: z.string().regex(UUID, "Invalid instructor").nullable().optional(),
   durationMinutes: z.number().int().min(0).max(100000).nullable().optional(),
-  learningObjectives: z.array(text(300)).max(30).default([]),
+  learningObjectives: z.array(text(300)).max(30),
   thumbnailPath: z.string().max(500).nullable().optional(),
+};
+export const courseInputSchema = z.object({
+  ...courseFields,
+  shortDescription: courseFields.shortDescription.default(""),
+  description: courseFields.description.default(""),
+  learningObjectives: courseFields.learningObjectives.default([]),
 });
-export const courseUpdateSchema = courseInputSchema.partial();
+export const courseUpdateSchema = z.object(courseFields).partial();
 
-export const sectionInputSchema = z.object({ title: z.string().trim().min(1, "Section title is required").max(200), description: text(2000).default("") });
+const sectionFields = { title: z.string().trim().min(1, "Section title is required").max(200), description: text(2000) };
+export const sectionInputSchema = z.object({ ...sectionFields, description: sectionFields.description.default("") });
+export const sectionUpdateSchema = z.object(sectionFields).partial();
 
 const optionSchema = z.object({ text: z.string().trim().min(1, "Every option needs text").max(1000), correct: z.boolean() });
 export const questionInputSchema = z
@@ -54,17 +64,22 @@ export const quizInputSchema = z.object({
   questions: z.array(questionInputSchema).max(500).default([]),
 });
 
+const contentFields = {
+  title: z.string().trim().min(1, "Title is required").max(200),
+  description: text(5000),
+  body: text(100000).nullable().optional(),
+  settings: z.object({ dueAt: z.string().datetime({ offset: true }).nullable().optional(), rating: z.boolean().optional() }),
+  file: z.object({ path: z.string().max(500), name: z.string().trim().min(1).max(255) }).nullable().optional(),
+  quiz: quizInputSchema.optional(),
+};
 export const contentInputSchema = z.object({
   sectionId: z.string().regex(UUID, "Invalid section"),
   type: z.enum(["image", "video", "document", "file", "lesson", "quiz", "question", "assignment", "feedback"]),
-  title: z.string().trim().min(1, "Title is required").max(200),
-  description: text(5000).default(""),
-  body: text(100000).nullable().optional(),
-  settings: z.object({ dueAt: z.string().datetime({ offset: true }).nullable().optional(), rating: z.boolean().optional() }).default({}),
-  file: z.object({ path: z.string().max(500), name: z.string().trim().min(1).max(255) }).nullable().optional(),
-  quiz: quizInputSchema.optional(),
+  ...contentFields,
+  description: contentFields.description.default(""),
+  settings: contentFields.settings.default({}),
 });
-export const contentUpdateSchema = contentInputSchema.omit({ sectionId: true, type: true }).partial();
+export const contentUpdateSchema = z.object(contentFields).partial();
 
 export const uploadRequestSchema = z.object({
   kind: z.enum(["thumbnail", "image", "video", "document", "file", "attachment"]),
@@ -402,7 +417,7 @@ export class LearningAdminService {
     requireAdmin(user);
     await loadBuildableCourse(courseId);
     await this.loadSection(courseId, sectionId);
-    await LearningRepository.updateSection(sectionId, parse(sectionInputSchema.partial(), input));
+    await LearningRepository.updateSection(sectionId, parse(sectionUpdateSchema, input));
     await LearningRepository.touchCourse(courseId);
     LearningMoodleSync.schedulePush(courseId);
   }

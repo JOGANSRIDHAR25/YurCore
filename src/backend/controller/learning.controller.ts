@@ -52,7 +52,13 @@ export const LearningController = {
       const user = await requireAuth(req);
       const sp = req.nextUrl.searchParams;
       const scope = (["all", "mine", "completed"].includes(sp.get("scope") ?? "") ? sp.get("scope") : "all") as ScopeFilter;
-      return LearningService.list(user, scope, { q: sp.get("q")?.slice(0, 100) || undefined, category: sp.get("category")?.slice(0, 80) || undefined });
+      const limit = Number(sp.get("limit") ?? "");
+      return LearningService.list(
+        user,
+        scope,
+        { q: sp.get("q")?.slice(0, 100) || undefined, category: sp.get("category")?.slice(0, 80) || undefined },
+        { limit: Number.isFinite(limit) && limit > 0 ? limit : undefined, cursor: sp.get("cursor")?.slice(0, 200) || null },
+      );
     }),
   categories: (req: NextRequest) => handle(async () => LearningService.categories(await requireAuth(req))),
   details: (req: NextRequest, ctx: Ctx) => handle(async () => LearningService.getDetails(await requireAuth(req), (await params(ctx)).id)),

@@ -77,6 +77,26 @@ export type Progress = { completed: number; total: number; percent: number };
 
 export type LearnerCourse = CourseSummary & { enrolled: boolean; state: LearnerState; progress: Progress | null };
 
+/** A catalogue card: only what the card shows. Missing data stays null/empty rather than being invented. */
+export type LearnerCourseCard = {
+  id: string;
+  title: string;
+  /** short description, else the start of the full description; "" when the course has neither */
+  summary: string;
+  category: string | null;
+  level: CourseLevel | null;
+  durationMinutes: number | null;
+  items: number;
+  thumbnailUrl: string | null;
+  instructorName: string | null;
+  enrolled: boolean;
+  state: LearnerState;
+  progress: Progress | null;
+};
+
+/** One "Show more" batch. `nextCursor` is opaque; pass it back to get the following batch. `total` is only sent with the first batch. */
+export type LearnerCoursePage = { items: LearnerCourseCard[]; nextCursor: string | null; hasMore: boolean; total: number | null };
+
 export type ItemProgress = {
   completed: boolean;
   /** quiz: best result so far */
