@@ -13,17 +13,18 @@ import { adminLearningApi } from "../_lib/api";
 import { CourseBuilder } from "../_components/CourseBuilder";
 import { CoursePreview } from "../_components/CoursePreview";
 import { LearnersPanel } from "../_components/LearnersPanel";
+import { FeedbackPanel } from "../_components/FeedbackPanel";
 import { PublishDialog, publishProblems } from "../_components/PublishDialog";
 import { MoodleOriginBadge, MoodleSyncStatus, Spinner, StatusBadge, Stepper, ghostBtn, primaryBtn } from "../_components/ui";
 
-const TABS = [["content", "Build content"], ["preview", "Preview"], ["learners", "Learners"]] as const;
+const TABS = [["content", "Build content"], ["feedback", "Feedback"], ["preview", "Preview"], ["learners", "Learners"]] as const;
 type Tab = (typeof TABS)[number][0];
 
 export default function CourseBuilderPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const router = useRouter();
   const tabParam = useSearchParams().get("tab");
-  const tab: Tab = tabParam === "preview" || tabParam === "learners" ? tabParam : "content";
+  const tab: Tab = tabParam === "preview" || tabParam === "learners" || tabParam === "feedback" ? tabParam : "content";
   const { data, loading, error, refetch } = useQuery(() => adminLearningApi.details(id), [id]);
   const [publishing, setPublishing] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -58,7 +59,7 @@ export default function CourseBuilderPage({ params }: { params: Promise<{ id: st
   const { course, sections } = data;
   const published = course.status === "published";
   const ready = publishProblems(sections).length === 0;
-  const meta = [course.category, course.level && LEVEL_LABEL[course.level], course.instructor && `By ${course.instructor.name}`].filter(Boolean).join(" · ");
+  const meta = [course.categories.map((c) => c.name).join(", ") || course.category, course.level && LEVEL_LABEL[course.level], course.credits > 0 && `${course.credits} ${course.creditType === "cme" ? "CME" : "Participation"} credits`, course.instructor && `By ${course.instructor.name}`].filter(Boolean).join(" · ");
 
   return (
     <div className="mx-auto max-w-6xl space-y-6 px-4 py-6 sm:px-6 lg:px-8">
@@ -115,12 +116,15 @@ export default function CourseBuilderPage({ params }: { params: Promise<{ id: st
           <button key={t} onClick={() => go(t)} className={cn("-mb-px border-b-2 px-4 py-2.5 text-sm font-semibold transition-colors", tab === t ? "border-herb-green text-herb-green" : "border-transparent text-muted-foreground hover:text-foreground")}>
             {label}
             {t === "learners" && course.learners > 0 && <span className="ml-1.5 rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">{course.learners}</span>}
+            {t === "feedback" && <span className={cn("ml-1.5 rounded-full px-1.5 py-0.5 text-[10px]", course.feedback.enabled ? "bg-herb-green/10 text-herb-green" : "bg-background text-muted-foreground")}>{course.feedback.enabled ? "On" : "Off"}</span>}
           </button>
         ))}
       </nav>
 
       {tab === "learners" ? (
         <LearnersPanel courseId={id} />
+      ) : tab === "feedback" ? (
+        <FeedbackPanel key={course.updatedAt} course={course} onSaved={refetch} />
       ) : tab === "preview" ? (
         <CoursePreview course={course} sections={sections} />
       ) : course.origin === "moodle" ? (
@@ -139,7 +143,7 @@ export default function CourseBuilderPage({ params }: { params: Promise<{ id: st
       )}
 
       {/* Step navigation: Build content → Preview → Publish */}
-      {tab !== "learners" && (
+      {tab !== "learners" && tab !== "feedback" && (
         <div className="sticky bottom-0 z-10 -mx-4 border-t border-border bg-background/95 px-4 py-4 backdrop-blur sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
           <div className="flex flex-wrap items-center justify-between gap-3">
             {tab === "content" ? (

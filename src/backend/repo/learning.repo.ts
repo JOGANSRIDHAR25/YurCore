@@ -21,11 +21,17 @@ export type CourseRow = {
   moodle_synced_at: string | null;
   moodle_sync_error: string | null;
   moodle_image_sig: string | null;
+  /** credits awarded on completion (numeric(5,1); PostgREST returns it as a number) */
+  credits: number;
+  credit_type: "cme" | "participation";
+  feedback_enabled: boolean;
+  feedback_title: string | null;
+  feedback_allow_comment: boolean;
   created_by: string;
   created_at: string;
   updated_at: string;
 };
-export type CourseWrite = Partial<Pick<CourseRow, "title" | "short_description" | "description" | "category_name" | "level" | "instructor_id" | "duration_minutes" | "learning_objectives" | "thumbnail_path" | "status" | "published_at">>;
+export type CourseWrite = Partial<Pick<CourseRow, "title" | "short_description" | "description" | "category_name" | "level" | "instructor_id" | "duration_minutes" | "learning_objectives" | "thumbnail_path" | "status" | "published_at" | "credits" | "credit_type" | "feedback_enabled" | "feedback_title" | "feedback_allow_comment">>;
 export type CourseSyncWrite = Partial<Pick<CourseRow, "moodle_synced_at" | "moodle_sync_error" | "moodle_image_sig">>;
 
 export type SectionRow = { id: string; course_id: string; title: string; description: string; position: number; moodle_section_id: number | null };
@@ -57,10 +63,15 @@ export type QuestionRow = { id: string; quiz_id: string; question: string; expla
 export type EnrollmentRow = { id: string; course_id: string; user_id: string; started_at: string; completed_at: string | null };
 
 /** Only what a learner's course card needs (no objectives, sync or audit columns). */
-const CARD_COLUMNS = "id, title, short_description, description, category_name, level, duration_minutes, thumbnail_path, instructor_id, published_at";
-export type CourseCardRow = Pick<CourseRow, "id" | "title" | "short_description" | "description" | "category_name" | "level" | "duration_minutes" | "thumbnail_path" | "instructor_id" | "published_at">;
-/** Position after the last card of a page, in the catalogue order (published_at desc, nulls last, then id desc). */
-export type CourseCursor = { publishedAt: string | null; id: string };
+const CARD_COLUMNS = "id, title, short_description, description, category_name, level, duration_minutes, thumbnail_path, instructor_id, published_at, created_at, credits, credit_type";
+export type CourseCardRow = Pick<CourseRow, "id" | "title" | "short_description" | "description" | "category_name" | "level" | "duration_minutes" | "thumbnail_path" | "instructor_id" | "published_at" | "created_at" | "credits" | "credit_type">;
+/**
+ * Catalogue orders: "published" = published_at desc (nulls last), the default; "newest" / "oldest" = created_at
+ * desc / asc. Ties are broken by id in the same direction, so paging is stable.
+ */
+export type CourseSort = "published" | "newest" | "oldest";
+/** Position after the last card of a page, in the page's order. `publishedAt` holds the sort key (published_at or created_at). */
+export type CourseCursor = { publishedAt: string | null; id: string; sort?: CourseSort };
 export type AttemptRow = { id: string; quiz_id: string; user_id: string; started_at: string; submitted_at: string | null; answers: Record<string, string>; correct_count: number | null; total_count: number | null; score_percent: number | null; passed: boolean | null };
 export type ResponseRow = { id: string; content_id: string; user_id: string; response_text: string; rating: number | null; submitted_at: string };
 
@@ -139,7 +150,7 @@ export class LearningRepository {
     if (filters.ids) query = query.in("id", filters.ids.length ? filters.ids : ["00000000-0000-0000-0000-000000000000"]);
     if (filters.q && term(filters.q)) {
       const t = term(filters.q);
-      query = query.or(`title.ilike.%${t}%,short_description.ilike.%${t}%,description.ilike.%${t}%`);
+      query = query.or(`title.ilike.%${t}%,short_description.ilike.%${t}%,description.ilike.%${t}%,category_name.ilike.%${t}%`);
     }
     const order = filters.status ? "published_at" : "created_at";
     return check(await query.order(order, { ascending: false, nullsFirst: false }), "course list") as CourseRow[];
@@ -150,18 +161,34 @@ export class LearningRepository {
    * pagination: the next page starts strictly after `cursor`, so cards never repeat or shift when courses are
    * published meanwhile. Reads `limit + 1` rows to know whether more exist. The total is counted only on request.
    */
-  static async listPublishedCoursePage(opts: { q?: string; category?: string; ids?: string[]; cursor?: CourseCursor | null; limit: number; withTotal: boolean }): Promise<{ rows: CourseCardRow[]; hasMore: boolean; total: number | null }> {
+  static async listPublishedCoursePage(opts: { q?: string; category?: string; ids?: string[]; cursor?: CourseCursor | null; limit: number; withTotal: boolean; sort?: CourseSort }): Promise<{ rows: CourseCardRow[]; hasMore: boolean; total: number | null }> {
+    const sort = opts.sort ?? "published";
     let query = db().from(T.courses).select(CARD_COLUMNS, opts.withTotal ? { count: "exact" } : undefined).eq("status", "published");
     if (opts.category) query = query.eq("category_name", opts.category);
     if (opts.ids) query = query.in("id", opts.ids.length ? opts.ids : ["00000000-0000-0000-0000-000000000000"]);
     const t = opts.q ? term(opts.q) : "";
-    if (t) query = query.or(`title.ilike.%${t}%,short_description.ilike.%${t}%,description.ilike.%${t}%`);
+    if (t) query = query.or(`title.ilike.%${t}%,short_description.ilike.%${t}%,description.ilike.%${t}%,category_name.ilike.%${t}%`);
     const c = opts.cursor;
-    if (c?.publishedAt) query = query.or(`published_at.lt."${c.publishedAt}",and(published_at.eq."${c.publishedAt}",id.lt.${c.id}),published_at.is.null`);
-    else if (c) query = query.is("published_at", null).lt("id", c.id);
-    const res = await query.order("published_at", { ascending: false, nullsFirst: false }).order("id", { ascending: false }).limit(opts.limit + 1);
+    if (sort === "published") {
+      if (c?.publishedAt) query = query.or(`published_at.lt."${c.publishedAt}",and(published_at.eq."${c.publishedAt}",id.lt.${c.id}),published_at.is.null`);
+      else if (c) query = query.is("published_at", null).lt("id", c.id);
+      query = query.order("published_at", { ascending: false, nullsFirst: false }).order("id", { ascending: false });
+    } else {
+      // created_at is never null: a plain keyset on (created_at, id).
+      const op = sort === "newest" ? "lt" : "gt";
+      if (c?.publishedAt) query = query.or(`created_at.${op}."${c.publishedAt}",and(created_at.eq."${c.publishedAt}",id.${op}.${c.id})`);
+      query = query.order("created_at", { ascending: sort === "oldest" }).order("id", { ascending: sort === "oldest" });
+    }
+    const res = await query.limit(opts.limit + 1);
     const rows = check(res, "course page") as unknown as CourseCardRow[];
     return { rows: rows.slice(0, opts.limit), hasMore: rows.length > opts.limit, total: opts.withTotal ? res.count ?? null : null };
+  }
+
+  /** Published course cards by id (recommendations). */
+  static async listPublishedCards(filter: { ids?: string[]; limit: number }): Promise<CourseCardRow[]> {
+    let query = db().from(T.courses).select(CARD_COLUMNS).eq("status", "published");
+    if (filter.ids) query = query.in("id", filter.ids.length ? filter.ids : ["00000000-0000-0000-0000-000000000000"]);
+    return check(await query.order("created_at", { ascending: false }).order("id", { ascending: false }).limit(filter.limit), "course cards") as unknown as CourseCardRow[];
   }
 
   /** id + course of every content item of the given courses (for item counts and progress totals). */

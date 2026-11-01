@@ -87,8 +87,8 @@ export function CategoryFilter({ value, options, onChange }: { value: string; op
         aria-activedescendant={open ? `${id}-opt-${active}` : undefined}
         onClick={() => (open ? setOpen(false) : openList())}
         className={cn(
-          "flex h-10 w-full items-center justify-between gap-2 rounded-[10px] border bg-white pl-3.5 pr-3 text-left text-sm shadow-xs outline-none transition-[border-color,box-shadow] duration-150",
-          open ? "border-copper/60 ring-[3px] ring-copper/15" : "border-neutral-200 hover:border-neutral-300 focus-visible:border-copper/60 focus-visible:ring-[3px] focus-visible:ring-copper/15",
+          "flex h-11 w-full items-center justify-between gap-2 rounded-xl border bg-white pl-3.5 pr-3 text-left text-sm shadow-[0_1px_2px_rgba(15,23,42,0.04)] outline-none transition-[border-color,box-shadow,background-color] duration-150",
+          open ? "border-herb-green/50 ring-[3px] ring-herb-green/10" : value !== ALL ? "border-herb-green/40 bg-herb-green/[0.03] hover:border-herb-green/60 focus-visible:ring-[3px] focus-visible:ring-herb-green/10" : "border-neutral-200 hover:border-neutral-300 focus-visible:border-herb-green/50 focus-visible:ring-[3px] focus-visible:ring-herb-green/10",
         )}
       >
         <span className={cn("truncate", value === ALL ? "text-neutral-700" : "font-medium text-neutral-900")}>{label(value)}</span>
@@ -101,7 +101,7 @@ export function CategoryFilter({ value, options, onChange }: { value: string; op
           id={`${id}-list`}
           role="listbox"
           aria-label="Categories"
-          className="absolute right-0 z-30 mt-1.5 max-h-72 w-full min-w-[13rem] overflow-y-auto rounded-xl border border-neutral-200 bg-white p-1 shadow-lg shadow-neutral-900/[0.06]"
+          className="absolute right-0 z-30 mt-1.5 max-h-72 w-full min-w-[13rem] overflow-y-auto rounded-xl border border-neutral-200 bg-white p-1 shadow-[0_16px_40px_-12px_rgba(15,23,42,0.22)]"
         >
           {items.map((v, i) => {
             const selected = v === value;
@@ -118,11 +118,11 @@ export function CategoryFilter({ value, options, onChange }: { value: string; op
                 className={cn(
                   "flex cursor-pointer items-center justify-between gap-2 rounded-lg px-2.5 py-2 text-sm transition-colors",
                   i === active ? "bg-neutral-100/80" : "",
-                  selected ? "font-medium text-copper" : "text-neutral-700",
+                  selected ? "font-medium text-herb-green" : "text-neutral-700",
                 )}
               >
                 <span className="truncate">{label(v)}</span>
-                {selected && <Check size={14} className="flex-shrink-0 text-copper" aria-hidden />}
+                {selected && <Check size={14} className="flex-shrink-0 text-herb-green" aria-hidden />}
               </li>
             );
           })}

@@ -97,7 +97,13 @@ function getDestination(role: UserRole): string {
   if (role === "admin" || role === "super_admin") {
     return "/admin/dashboard";
   }
-  return role === "practitioner" || role === "assistant" ? "/pro" : "/";
+  const home = role === "practitioner" || role === "assistant" ? "/pro" : "/";
+  // Return to the page that sent the user here (e.g. a course link from an email), when it belongs to their area.
+  const next = typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("next");
+  if (next && /^\/(?!\/)[^\s\\]*$/.test(next) && !next.startsWith("/login") && (home === "/pro" ? next.startsWith("/pro") : !next.startsWith("/pro") && !next.startsWith("/admin"))) {
+    return next;
+  }
+  return home;
 }
 
 export default function LoginPage() {

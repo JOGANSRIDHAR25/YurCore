@@ -2,6 +2,7 @@ import "server-only";
 
 import type { ContentItem, CourseCounts, CourseSummary, QuizQuestion, Section } from "@/shared/learning/types";
 import { LearningRepository, type ContentRow, type CourseRow, type PractitionerInfo, type QuestionRow, type QuizRow, type SectionRow } from "../repo/learning.repo";
+import { LearningProfileRepository } from "../repo/learning-profile.repo";
 
 /** Helpers shared by the admin (course building) and practitioner (learning) services. */
 
@@ -27,12 +28,14 @@ const instructorDto = (p: PractitionerInfo | undefined) =>
 /** Course cards/headers for a list of courses: counts, instructor and a signed thumbnail URL. */
 export async function summaries(rows: CourseRow[]): Promise<{ list: CourseSummary[]; sections: SectionRow[]; content: ContentRow[] }> {
   const ids = rows.map((r) => r.id);
-  const [sections, content, instructors, thumbs] = await Promise.all([
+  const [sections, content, instructors, thumbs, categoryIds] = await Promise.all([
     LearningRepository.listSections(ids),
     LearningRepository.listContent(ids),
     LearningRepository.getPractitioners([...new Set(rows.map((r) => r.instructor_id).filter((x): x is string => Boolean(x)))]),
     LearningRepository.signedUrls(rows.map((r) => r.thumbnail_path ?? ""), FILE_URL_TTL).catch(() => new Map<string, string>()),
+    LearningProfileRepository.courseCategoryIds(ids),
   ]);
+  const categories = new Map((await LearningProfileRepository.getCategories([...new Set([...categoryIds.values()].flat())])).map((c) => [c.id, c]));
   const list = rows.map<CourseSummary>((r) => ({
     id: r.id,
     title: r.title,
@@ -49,6 +52,9 @@ export async function summaries(rows: CourseRow[]): Promise<{ list: CourseSummar
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     counts: countsFor(r.id, sections, content),
+    categories: (categoryIds.get(r.id) ?? []).map((id) => categories.get(id)).filter((c) => Boolean(c)).map((c) => ({ id: c!.id, name: c!.name })),
+    credits: Number(r.credits ?? 0),
+    creditType: r.credit_type ?? "cme",
   }));
   return { list, sections, content };
 }

@@ -3,7 +3,7 @@
 import { SITE_NAME } from "@/shared/config/site";
 import { useRef, useState } from "react";
 import { toast } from "react-hot-toast";
-import { Clock, ImagePlus, Plus, RefreshCw, Target, Trash2, X } from "lucide-react";
+import { Award, Check, Clock, ImagePlus, Plus, RefreshCw, Target, Trash2, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useQuery } from "@/hooks/useQuery";
 import { LEVEL_LABEL, UPLOAD_RULES, formatDuration } from "@/shared/learning/content";
@@ -18,11 +18,15 @@ const LEVELS = Object.entries(LEVEL_LABEL) as [CourseLevel, string][];
  * everything else (content, quizzes) is added in the course builder.
  */
 export function CourseDetailsForm({ course, onSaved, onCancel }: { course?: AdminCourse; onSaved: (c: AdminCourse) => void; onCancel: () => void }) {
-  const { data: categories } = useQuery(() => adminLearningApi.categories(), []);
+  const { data: categories, refetch: refetchCategories } = useQuery(() => adminLearningApi.categories(), []);
+  const [newCategory, setNewCategory] = useState("");
+  const [addingCategory, setAddingCategory] = useState(false);
   const [title, setTitle] = useState(course?.title ?? "");
   const [shortDescription, setShortDescription] = useState(course?.shortDescription ?? "");
   const [description, setDescription] = useState(course?.description ?? "");
-  const [category, setCategory] = useState(course?.category ?? "");
+  const [categoryIds, setCategoryIds] = useState<string[]>(course?.categories.map((c) => c.id) ?? []);
+  const [credits, setCredits] = useState(course?.credits ? String(course.credits) : "");
+  const [creditType, setCreditType] = useState<"cme" | "participation">(course?.creditType ?? "cme");
   const [level, setLevel] = useState<CourseLevel | null>(course?.level ?? null);
   const [hours, setHours] = useState(course?.durationMinutes ? String(Math.floor(course.durationMinutes / 60)) : "");
   const [minutes, setMinutes] = useState(course?.durationMinutes ? String(course.durationMinutes % 60) : "");
@@ -37,6 +41,31 @@ export function CourseDetailsForm({ course, onSaved, onCancel }: { course?: Admi
 
   const duration = (Number(hours) || 0) * 60 + (Number(minutes) || 0);
 
+  /** Typed category: selects an existing one with the same name (any case), otherwise creates it in the managed list. */
+  async function addCategory() {
+    const name = newCategory.trim().replace(/\s+/g, " ");
+    if (!name || addingCategory) return;
+    const existing = (categories ?? []).find((c) => c.name.toLowerCase() === name.toLowerCase());
+    if (existing) {
+      if (!existing.active) return toast.error(`"${existing.name}" is inactive. Reactivate it in Learning settings.`);
+      if (!categoryIds.includes(existing.id)) setCategoryIds([...categoryIds, existing.id]);
+      setNewCategory("");
+      return;
+    }
+    setAddingCategory(true);
+    try {
+      const created = await adminLearningApi.createCategory(name);
+      setCategoryIds((ids) => [...ids, created.id]);
+      setNewCategory("");
+      refetchCategories();
+      toast.success(`Category "${created.name}" added`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not add the category");
+    } finally {
+      setAddingCategory(false);
+    }
+  }
+
   function pickThumb(f: File | undefined) {
     if (!f) return;
     if (!UPLOAD_RULES.thumbnail.mime.includes(f.type)) return toast.error(`Use a ${UPLOAD_RULES.thumbnail.label} image`);
@@ -48,11 +77,17 @@ export function CourseDetailsForm({ course, onSaved, onCancel }: { course?: Admi
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (title.trim().length < 3) return toast.error("Course title must be at least 3 characters");
+    const creditValue = credits.trim() === "" ? 0 : Number(credits);
+    if (!Number.isFinite(creditValue) || creditValue < 0 || creditValue > 999) return toast.error("Credits must be a number from 0 to 999");
+    if (Math.round(creditValue * 10) !== creditValue * 10) return toast.error("Use at most one decimal place for credits");
     const input: CourseInput = {
       title: title.trim(),
       shortDescription: shortDescription.trim(),
       description: description.trim(),
-      category: category.trim() || null,
+      category: course?.category ?? null,
+      categoryIds,
+      credits: creditValue,
+      creditType,
       level,
       durationMinutes: duration || null,
       learningObjectives: objectives.map((o) => o.trim()).filter(Boolean),
@@ -98,9 +133,38 @@ export function CourseDetailsForm({ course, onSaved, onCancel }: { course?: Admi
               <input value={shortDescription} onChange={(e) => setShortDescription(e.target.value)} maxLength={300} placeholder="One sentence that tells practitioners what they will learn" className={inputCls} />
             </Field>
             <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="Category" hint="Pick an existing category or type a new one.">
-                <input value={category} onChange={(e) => setCategory(e.target.value)} list="learning-categories" maxLength={80} placeholder="e.g. Clinical Ayurveda" className={inputCls} />
-                <datalist id="learning-categories">{(categories ?? []).map((c) => <option key={c} value={c} />)}</datalist>
+              <Field label="Categories" hint="Select existing categories or type a new one. The first selected is the primary category.">
+                <div className="flex flex-wrap gap-1.5">
+                  {(categories ?? []).filter((c) => c.active || categoryIds.includes(c.id)).map((c) => {
+                    const on = categoryIds.includes(c.id);
+                    return (
+                      <button key={c.id} type="button" aria-pressed={on} onClick={() => setCategoryIds(on ? categoryIds.filter((x) => x !== c.id) : [...categoryIds, c.id])}
+                        className={cn("inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors", on ? "border-herb-green bg-herb-green/10 text-herb-green" : "border-border bg-white text-muted-foreground hover:text-foreground", !c.active && "opacity-60")}>
+                        {on && <Check size={11} strokeWidth={3} />}{c.name}{categoryIds[0] === c.id && categoryIds.length > 1 ? " · primary" : ""}
+                      </button>
+                    );
+                  })}
+                  {categories && categories.length === 0 && <span className="text-xs text-muted-foreground">No categories yet. Type one below.</span>}
+                </div>
+                <div className="mt-2 flex gap-2">
+                  <input
+                    value={newCategory}
+                    onChange={(e) => setNewCategory(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault(); // do not submit the course form
+                        addCategory();
+                      }
+                    }}
+                    maxLength={80}
+                    placeholder="Type a new category, e.g. Panchakarma"
+                    aria-label="New category name"
+                    className={inputCls + " !py-2"}
+                  />
+                  <button type="button" onClick={addCategory} disabled={!newCategory.trim() || addingCategory} className={ghostBtn + " flex-shrink-0"}>
+                    <Plus size={14} /> {addingCategory ? "Adding…" : "Add"}
+                  </button>
+                </div>
               </Field>
               <div className="space-y-1.5">
                 <span className="text-[13px] font-semibold text-foreground">Course level</span>
@@ -190,6 +254,20 @@ export function CourseDetailsForm({ course, onSaved, onCancel }: { course?: Admi
           </div>
         </Card>
 
+        <Card title="Credits" description="Awarded once, when the learner's certificate is issued.">
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <Award size={16} className="text-herb-green" />
+              <input type="number" min={0} max={999} step="any" inputMode="decimal" value={credits} onChange={(e) => setCredits(e.target.value)} placeholder="0" className={inputCls + " !w-24"} aria-label="Credits" />
+              <select value={creditType} onChange={(e) => setCreditType(e.target.value as "cme" | "participation")} className={inputCls + " !w-auto"} aria-label="Credit type">
+                <option value="cme">CME</option>
+                <option value="participation">Participation</option>
+              </select>
+            </div>
+            <p className="text-xs leading-relaxed text-muted-foreground">One decimal place (e.g. 2.5). Changing it later does not change credits already awarded. For reference, the NCISM guidelines tentatively list 5 points for an online module of 3 to under 6 hours and 10 points for 6 hours or more; final values are decided by the Board of Ethics &amp; Registration.</p>
+          </div>
+        </Card>
+
         <Card title="Course status">
           <div className="grid gap-3 sm:grid-cols-2">
             {(["draft", "published"] as const).map((s) => {
@@ -230,7 +308,7 @@ export function CourseDetailsForm({ course, onSaved, onCancel }: { course?: Admi
           <div className="overflow-hidden rounded-2xl border border-border bg-white shadow-sm">
             {thumbPreview ? <img src={thumbPreview} alt="" className="aspect-video w-full object-cover" /> : <div className="flex aspect-video w-full items-center justify-center bg-gradient-to-br from-herb-green/15 to-copper/10 text-herb-green/60"><ImagePlus size={28} /></div>}
             <div className="p-4">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-copper">{[category.trim(), level && LEVEL_LABEL[level]].filter(Boolean).join(" · ") || "Category"}</p>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-copper">{[(categories ?? []).find((c) => c.id === categoryIds[0])?.name, level && LEVEL_LABEL[level]].filter(Boolean).join(" · ") || "Category"}</p>
               <h3 className="mt-1 line-clamp-2 font-display text-base font-bold leading-snug text-foreground">{title.trim() || "Course title"}</h3>
               <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{shortDescription.trim() || "Short description"}</p>
               <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">

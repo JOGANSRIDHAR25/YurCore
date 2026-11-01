@@ -12,6 +12,8 @@ import { MoodleError } from "@/backend/integration/moodle/moodle.client";
 import { getMoodleConfig } from "@/backend/integration/moodle/config";
 import { UUID, buildSections, summaries } from "./learning-common";
 import { LearningMoodleSync, toHtml } from "./learning-moodle-sync.service";
+import { LearningProfileRepository } from "../repo/learning-profile.repo";
+import { LearningNotify } from "./learning-notify.service";
 
 /**
  * Course building. Admin roles only: every public method starts with requireAdmin, and
@@ -34,6 +36,13 @@ const courseFields = {
   durationMinutes: z.number().int().min(0).max(100000).nullable().optional(),
   learningObjectives: z.array(text(300)).max(30),
   thumbnailPath: z.string().max(500).nullable().optional(),
+  /** managed categories (the first is the primary category shown on cards) */
+  categoryIds: z.array(z.string().regex(UUID, "Invalid category")).max(10, "Choose up to 10 categories").optional(),
+  credits: z.number().min(0, "Credits cannot be negative").max(999).refine((n) => Math.round(n * 10) === n * 10, "Use at most one decimal place for credits").optional(),
+  creditType: z.enum(["cme", "participation"]).optional(),
+  feedbackEnabled: z.boolean().optional(),
+  feedbackTitle: text(200).nullable().optional(),
+  feedbackAllowComment: z.boolean().optional(),
 };
 export const courseInputSchema = z.object({
   ...courseFields,
@@ -144,8 +153,30 @@ const courseWrite = (input: z.infer<typeof courseUpdateSchema>): CourseWrite => 
   if (input.instructorId !== undefined) out.instructor_id = input.instructorId;
   if (input.durationMinutes !== undefined) out.duration_minutes = input.durationMinutes || null;
   if (input.learningObjectives !== undefined) out.learning_objectives = input.learningObjectives.filter(Boolean);
+  if (input.credits !== undefined) out.credits = Math.round(input.credits * 10) / 10;
+  if (input.creditType !== undefined) out.credit_type = input.creditType;
+  if (input.feedbackEnabled !== undefined) out.feedback_enabled = input.feedbackEnabled;
+  // An empty title means "use the course title": stored as null so it keeps following title changes.
+  if (input.feedbackTitle !== undefined) out.feedback_title = input.feedbackTitle?.trim() || null;
+  if (input.feedbackAllowComment !== undefined) out.feedback_allow_comment = input.feedbackAllowComment;
   return out;
 };
+
+/**
+ * Resolves managed category ids (active ones only for new assignments) and sets category_name to the first,
+ * so existing screens and the Moodle sync keep their primary category.
+ */
+async function resolveCategories(ids: string[] | undefined, current: string[] = []): Promise<{ ids: string[]; primary: string | null } | null> {
+  if (ids === undefined) return null;
+  const unique = [...new Set(ids)];
+  const rows = await LearningProfileRepository.getCategories(unique);
+  for (const id of unique) {
+    const row = rows.find((r) => r.id === id);
+    if (!row) throw new ValidationError("One of the selected categories no longer exists");
+    if (!row.is_active && !current.includes(id)) throw new ValidationError(`The category "${row.name}" is inactive`);
+  }
+  return { ids: unique, primary: rows.find((r) => r.id === unique[0])?.name ?? null };
+}
 
 /** Everything that must be true before learners can see a course. */
 export function publishProblems(content: Pick<ContentRow, "content_type" | "title" | "storage_path" | "id">[], questionCounts: Map<string, number>): string[] {
@@ -209,6 +240,7 @@ export class LearningAdminService {
         origin: rows[i].origin,
         moodleSync: { syncedAt: rows[i].moodle_synced_at, error: rows[i].moodle_sync_error, busy: LearningMoodleSync.isBusy(c.id) },
         moodleUrl: mid === null ? null : `${getMoodleConfig().publicUrl}/course/view.php?id=${mid}`,
+        feedback: { enabled: rows[i].feedback_enabled, title: rows[i].feedback_title, allowComment: rows[i].feedback_allow_comment },
       };
     });
   }
@@ -277,13 +309,15 @@ export class LearningAdminService {
       }),
     );
 
+    const cats = await resolveCategories(data.categoryIds);
     let row: CourseRow;
     try {
-      row = await LearningRepository.insertCourse({ ...courseWrite(data), title: data.title, status: "draft", created_by: user.id, moodle_course_id: moodleCourseId });
+      row = await LearningRepository.insertCourse({ ...courseWrite(data), ...(cats ? { category_name: cats.primary } : {}), title: data.title, status: "draft", created_by: user.id, moodle_course_id: moodleCourseId });
     } catch (err) {
       await Moodle.deleteCourse(moodleCourseId).catch((e) => console.error("[learning] rollback of Moodle course failed", moodleCourseId, e instanceof MoodleError ? e.detail : e));
       throw err;
     }
+    if (cats) await LearningProfileRepository.setCourseCategories(row.id, cats.ids);
     // A course always starts with one section so the builder is never empty.
     await LearningRepository.insertSection({ course_id: row.id, title: "Introduction", description: "", position: 0 });
     LearningMoodleSync.schedulePush(row.id);
@@ -299,6 +333,12 @@ export class LearningAdminService {
     }
     const patch = courseWrite(data);
     if (data.instructorId && !(await LearningRepository.getPractitioner(data.instructorId))) throw new ValidationError("Choose an instructor from the practitioner list");
+    const currentCats = (await LearningProfileRepository.courseCategoryIds([courseId])).get(courseId) ?? [];
+    const cats = await resolveCategories(data.categoryIds, currentCats);
+    if (cats) {
+      patch.category_name = cats.primary;
+      if (JSON.stringify(cats.ids) !== JSON.stringify(currentCats)) await LearningProfileRepository.setCourseCategories(courseId, cats.ids);
+    }
 
     let oldThumb: string | null = null;
     if (data.thumbnailPath !== undefined && data.thumbnailPath !== current.thumbnail_path) {
@@ -340,6 +380,9 @@ export class LearningAdminService {
     }
     const row = await LearningRepository.updateCourse(courseId, { status: published ? "published" : "draft", published_at: published ? new Date().toISOString() : null });
     LearningMoodleSync.schedulePush(courseId);
+    // Learners interested in the course's categories are emailed in the background (once per learner per course,
+    // so unpublishing and publishing again never re-notifies). An email failure never affects publishing.
+    if (published && current.status !== "published") LearningNotify.scheduleNewCourse(courseId);
     return (await this.toAdmin([row]))[0];
   }
 

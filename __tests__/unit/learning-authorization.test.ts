@@ -77,7 +77,10 @@ describe("YurCore Learning validation", () => {
     expect(decodeCursor(encodeCursor(c))).toEqual(c);
     expect(decodeCursor(encodeCursor({ publishedAt: null, id: ID }))).toEqual({ publishedAt: null, id: ID });
     expect(decodeCursor(null)).toBeNull();
+    const sorted = { publishedAt: "2026-10-27T10:00:00.000Z", id: ID, sort: "oldest" as const };
+    expect(decodeCursor(encodeCursor(sorted))).toEqual(sorted);
     const bad = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64url");
+    expect(() => decodeCursor(bad(["2026-10-27", ID, "title"]))).toThrow(); // only known sorts
     expect(() => decodeCursor("not-base64-json")).toThrow();
     expect(() => decodeCursor(bad(["2026-10-27", "not-a-uuid"]))).toThrow();
     expect(() => decodeCursor(bad(['2026-10-27",id.gt.0', ID]))).toThrow(); // filter injection attempt

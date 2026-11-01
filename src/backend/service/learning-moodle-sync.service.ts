@@ -8,6 +8,7 @@ import type { ContentType, FileContentType } from "@/shared/learning/types";
 import { Moodle, type MoodleActivity, type MoodleCourse, type MoodleFile, type MoodleSection, type QuizQuestion as MoodleQuizQuestion } from "@/backend/integration/moodle/moodle.service";
 import { MoodleError } from "@/backend/integration/moodle/moodle.client";
 import { getMoodleConfig } from "@/backend/integration/moodle/config";
+import { LearningNotify } from "./learning-notify.service";
 import { LearningRepository, type ContentRow, type ContentWrite, type QuestionRow, type QuizRow, type SectionRow } from "../repo/learning.repo";
 
 /**
@@ -475,6 +476,8 @@ async function pullCourse(courseId: string, live?: MoodleCourse): Promise<void> 
       }
     }
     if (Object.keys(patch).length) await LearningRepository.updateCourse(courseId, patch);
+    // Made visible in Moodle: interested learners get the same new-course notification (deduplicated per learner).
+    if (patch.status === "published") await LearningNotify.newCourse(courseId).catch((err) => console.error("[learning] new-course notifications failed:", err instanceof Error ? err.message : err));
     await LearningRepository.removeFiles(removedFiles);
     await LearningRepository.setCourseSync(courseId, { moodle_synced_at: new Date().toISOString(), moodle_sync_error: problems.length ? problems.join(" · ") : null });
   } catch (err) {

@@ -20,4 +20,8 @@ export const CONTENT_META: Record<ContentType, ContentMeta> = {
 };
 
 export const LEARNING_TYPES: ContentType[] = ["video", "image", "document", "file", "lesson"];
-export const ASSESSMENT_TYPES: ContentType[] = ["quiz", "question", "assignment", "feedback"];
+/**
+ * Types offered by Add Content. Feedback is no longer added as content: it is the course-level Feedback module
+ * (course builder → Feedback). Existing feedback items still display and count as before.
+ */
+export const ASSESSMENT_TYPES: ContentType[] = ["quiz", "question", "assignment"];

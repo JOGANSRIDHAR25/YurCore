@@ -138,8 +138,15 @@ async function handleMiddleware(
     pathname.startsWith("/onboarding/")
   ) {
     if (auth) {
+      // Already signed in: honour a same-site ?next= inside the user's own area (e.g. /pro/learning/...).
+      const next = req.nextUrl.searchParams.get("next");
+      const home = getDashboardPath(auth);
+      const safeNext =
+        next && /^\/(?!\/)[^\s\\]*$/.test(next) && !next.startsWith("/login") && home !== "/" && next.startsWith(home === "/admin/dashboard" ? "/admin" : home)
+          ? next
+          : null;
       return NextResponse.redirect(
-        new URL(getDashboardPath(auth), req.url),
+        new URL(safeNext ?? home, req.url),
       );
     }
 

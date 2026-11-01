@@ -5,9 +5,11 @@ import { toast } from "react-hot-toast";
 import { ArrowLeft, ArrowRight, BarChart3, CalendarClock, Check, CheckCircle2, Circle, Clock, Download, ExternalLink, Layers, ListTree, PlayCircle, Star, Target, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { LEVEL_LABEL, formatBytes, formatDuration, isFileType } from "@/shared/learning/content";
-import type { AttemptResult, AttemptStart, ContentItem, CourseSummary, ItemProgress, Progress, Section } from "@/shared/learning/types";
+import type { AttemptResult, AttemptStart, ContentItem, CourseCompletion, CourseRating, CourseSummary, ItemProgress, Progress, Section } from "@/shared/learning/types";
 import { CONTENT_META } from "./content-meta";
 import { QuizRunner } from "./QuizRunner";
+import { CompletionPanel, type CompletionHandlers } from "./CompletionPanel";
+import { RatingBadge } from "./CourseRating";
 
 export type PlayerHandlers = {
   start: () => Promise<void>;
@@ -24,6 +26,11 @@ type Props = {
   enrolled: boolean;
   courseProgress: Progress | null;
   handlers: PlayerHandlers;
+  /** Learners only: course feedback and certificate (not shown in the admin preview). */
+  completion?: CourseCompletion;
+  completionHandlers?: CompletionHandlers;
+  /** Learners only: aggregated learner ratings (from course feedback). */
+  rating?: CourseRating | null;
 };
 
 const initials = (name: string) => name.split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
@@ -116,22 +123,22 @@ function ResponseForm({ item, progress, onSubmit }: { item: ContentItem; progres
  * with local handlers, as the admin preview, so the preview matches what learners get.
  */
 /** Course outline: sections with their items and completion ticks. Used beside the overview and in the learning drawer. */
-function Outline({ sections, progress, selected, onOpen }: { sections: Section[]; progress: Record<string, ItemProgress>; selected: string | null; onOpen: (id: string | null) => void }) {
+function Outline({ sections, progress, selected, onOpen, completion, onCompletion }: { sections: Section[]; progress: Record<string, ItemProgress>; selected: string | null; onOpen: (id: string | null) => void; completion?: CourseCompletion; onCompletion?: () => void }) {
   return (
     <>
-      <button onClick={() => onOpen(null)} className={cn("mb-2 flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm font-semibold", selected === null ? "bg-copper/10 text-copper" : "text-foreground hover:bg-neutral-50")}>Course overview</button>
+      <button onClick={() => onOpen(null)} className={cn("mb-2 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-herb-green/35", selected === null ? "bg-herb-green/[0.07] text-herb-green" : "text-neutral-800 hover:bg-neutral-50")}>Course overview</button>
       {sections.map((s, si) => (
         <div key={s.id} className="mt-3">
-          <p className="px-3 text-[11px] font-bold uppercase tracking-wider text-muted-foreground">Section {si + 1}</p>
-          <p className="px-3 text-sm font-semibold text-foreground">{s.title}</p>
+          <p className="px-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-400">Section {si + 1}</p>
+          <p className="px-3 text-sm font-semibold text-neutral-900">{s.title}</p>
           <ul className="mt-1.5 space-y-0.5">
             {s.items.map((item) => {
               const done = progress[item.id]?.completed;
               const Icon = CONTENT_META[item.type].icon;
               return (
                 <li key={item.id}>
-                  <button onClick={() => onOpen(item.id)} aria-current={selected === item.id ? "step" : undefined} className={cn("flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-[13px]", selected === item.id ? "bg-copper/10 font-semibold text-copper" : "text-foreground/80 hover:bg-neutral-50")}>
-                    {done ? <CheckCircle2 size={15} className="flex-shrink-0 text-herb-green" /> : <Circle size={15} className="flex-shrink-0 text-neutral-300" />}
+                  <button onClick={() => onOpen(item.id)} aria-current={selected === item.id ? "step" : undefined} className={cn("flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-[13px] transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-herb-green/35", selected === item.id ? "bg-herb-green/[0.07] font-semibold text-herb-green" : "text-slate-700 hover:bg-neutral-50")}>
+                    {done ? <CheckCircle2 size={15} className="flex-shrink-0 text-emerald-600" aria-label="Completed" /> : <Circle size={15} className="flex-shrink-0 text-neutral-300" aria-label="Not completed" />}
                     <span className="min-w-0 flex-1 truncate">{item.title}</span>
                     <Icon size={13} className="flex-shrink-0 text-muted-foreground" />
                   </button>
@@ -142,6 +149,14 @@ function Outline({ sections, progress, selected, onOpen }: { sections: Section[]
           </ul>
         </div>
       ))}
+      {completion && onCompletion && (
+        <div className="mt-4 border-t border-neutral-100 pt-3">
+          <button onClick={onCompletion} className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-[13px] text-slate-700 transition-colors duration-150 hover:bg-neutral-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-herb-green/35">
+            {completion.stage === "issued" ? <CheckCircle2 size={15} className="flex-shrink-0 text-emerald-600" aria-label="Completed" /> : <Circle size={15} className="flex-shrink-0 text-neutral-300" aria-label="Not completed" />}
+            <span className="min-w-0 flex-1 truncate font-semibold">{completion.feedback.enabled ? "Feedback & certificate" : "Certificate"}</span>
+          </button>
+        </div>
+      )}
     </>
   );
 }
@@ -151,7 +166,7 @@ function Outline({ sections, progress, selected, onOpen }: { sections: Section[]
  * learner starts or opens an item, a focused learning view where the item gets the full column and
  * the outline is a slide-over. Used for real learners and, with local handlers, as the admin preview.
  */
-export function CoursePlayer({ course, sections, progress, enrolled, courseProgress, handlers }: Props) {
+export function CoursePlayer({ course, sections, progress, enrolled, courseProgress, handlers, completion, completionHandlers, rating }: Props) {
   const flat = useMemo(() => sections.flatMap((s, si) => s.items.map((item) => ({ item, section: s, sectionIndex: si }))), [sections]);
   const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -199,6 +214,13 @@ export function CoursePlayer({ course, sections, progress, enrolled, courseProgr
     }
   }
 
+  /** Back to the overview, scrolled to the feedback / certificate module. */
+  function showCompletion() {
+    setSelected(null);
+    setContentsOpen(false);
+    requestAnimationFrame(() => requestAnimationFrame(() => document.getElementById("course-completion")?.scrollIntoView({ behavior: "smooth", block: "start" })));
+  }
+
   const next = index >= 0 && index < flat.length - 1 ? flat[index + 1] : null;
   const prev = index > 0 ? flat[index - 1] : null;
 
@@ -229,7 +251,7 @@ export function CoursePlayer({ course, sections, progress, enrolled, courseProgr
             {next ? (
               <button onClick={() => open(next.item.id)} className="inline-flex items-center gap-1.5 rounded-xl bg-copper px-4 py-2 text-sm font-semibold text-white hover:opacity-90">Next <ArrowRight size={15} /></button>
             ) : (
-              <button onClick={() => open(null)} className="inline-flex items-center gap-1.5 rounded-xl border border-border px-4 py-2 text-sm font-semibold text-foreground hover:bg-neutral-50">Finish</button>
+              <button onClick={() => (completion ? showCompletion() : open(null))} className="inline-flex items-center gap-1.5 rounded-xl border border-border px-4 py-2 text-sm font-semibold text-foreground hover:bg-neutral-50">Finish</button>
             )}
           </div>
         </div>
@@ -244,7 +266,7 @@ export function CoursePlayer({ course, sections, progress, enrolled, courseProgr
                 </div>
                 <button onClick={() => setContentsOpen(false)} aria-label="Close contents" className="rounded-lg p-1.5 text-muted-foreground hover:bg-neutral-50"><X size={18} /></button>
               </div>
-              <div className="flex-1 overflow-y-auto p-3"><Outline sections={sections} progress={progress} selected={selected} onOpen={open} /></div>
+              <div className="flex-1 overflow-y-auto p-3"><Outline sections={sections} progress={progress} selected={selected} onOpen={open} completion={completion} onCompletion={showCompletion} /></div>
             </nav>
           </div>
         )}
@@ -261,15 +283,23 @@ export function CoursePlayer({ course, sections, progress, enrolled, courseProgr
 
   return (
     <div ref={root} className="scroll-mt-4 space-y-6">
-      <div className="overflow-hidden rounded-2xl border border-border/60 bg-white shadow-xs">
+      {/* not overflow-hidden: the rating popover opens below the card; the image clips its own corners instead */}
+      <div className="rounded-2xl border border-neutral-200/80 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
         <div className="grid md:grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)]">
           <div className="order-2 flex flex-col p-6 md:order-1 md:p-8">
-            {course.category && <p className="text-[11px] font-bold uppercase tracking-wider text-copper">{course.category}</p>}
-            <h1 className="mt-1 font-display text-2xl font-bold tracking-tight text-foreground md:text-3xl">{course.title}</h1>
-            {course.shortDescription && <p className="mt-2 text-sm text-foreground/75">{course.shortDescription}</p>}
-            <div className="mt-4 flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-muted-foreground">
-              {meta.map(({ icon: I, text }) => <span key={text} className="flex items-center gap-1.5"><I size={13} /> {text}</span>)}
+            <div className="flex flex-wrap items-center gap-2">
+              {course.category && <span className="rounded-md bg-copper/[0.08] px-2 py-0.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-copper">{course.category}</span>}
+              {enrolled && (
+                courseProgress && courseProgress.percent === 100
+                  ? <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 ring-1 ring-inset ring-emerald-200/70"><CheckCircle2 size={12} aria-hidden /> Completed</span>
+                  : <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-700 ring-1 ring-inset ring-amber-200/70"><span className="h-1.5 w-1.5 rounded-full bg-amber-500" aria-hidden /> In progress</span>
+              )}
             </div>
+            <h1 className="mt-3 font-display text-[26px] font-bold leading-tight tracking-tight text-neutral-900 md:text-[32px]">{course.title}</h1>
+            {course.shortDescription && <p className="mt-2 max-w-prose text-[15px] leading-relaxed text-slate-600">{course.shortDescription}</p>}
+            <ul className="mt-4 flex flex-wrap gap-2 text-xs text-slate-600" aria-label="Course details">
+              {meta.map(({ icon: I, text }) => <li key={text} className="inline-flex items-center gap-1.5 rounded-lg bg-neutral-50 px-2.5 py-1.5 ring-1 ring-inset ring-neutral-200/70"><I size={13} className="text-slate-400" aria-hidden /> {text}</li>)}
+            </ul>
             {course.instructor && (
               <div className="mt-4 flex items-center gap-2.5">
                 {course.instructor.photoUrl ? <img src={course.instructor.photoUrl} alt="" className="h-8 w-8 rounded-full object-cover" /> : <span className="flex h-8 w-8 items-center justify-center rounded-full bg-copper/10 text-[11px] font-bold text-copper">{initials(course.instructor.name)}</span>}
@@ -278,56 +308,62 @@ export function CoursePlayer({ course, sections, progress, enrolled, courseProgr
             )}
             <div className="mt-auto pt-6">
               {courseProgress && (
-                <div className="mb-4">
-                  <div className="flex justify-between text-xs font-semibold text-foreground"><span>Your progress</span><span>{courseProgress.completed}/{courseProgress.total} · {courseProgress.percent}%</span></div>
-                  <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-neutral-100"><div className="h-full rounded-full bg-herb-green transition-[width]" style={{ width: `${courseProgress.percent}%` }} /></div>
+                <div className="mb-5 rounded-xl bg-neutral-50 px-4 py-3 ring-1 ring-inset ring-neutral-200/70">
+                  <div className="flex justify-between text-xs font-medium text-slate-600"><span>Your progress</span><span className="tabular-nums font-semibold text-neutral-900">{courseProgress.completed}/{courseProgress.total} · {courseProgress.percent}%</span></div>
+                  <div className="mt-2 h-2 overflow-hidden rounded-full bg-white ring-1 ring-inset ring-neutral-200/70" role="progressbar" aria-label="Course progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={courseProgress.percent}><div className={cn("h-full rounded-full transition-[width] duration-300", courseProgress.percent === 100 ? "bg-emerald-500" : "bg-copper")} style={{ width: `${courseProgress.percent}%` }} /></div>
                 </div>
               )}
-              {flat.length > 0 && (
-                <button onClick={() => open(firstOpen.item.id)} className="inline-flex items-center gap-2 rounded-xl bg-copper px-5 py-2.5 text-sm font-semibold text-white hover:opacity-90">
-                  <PlayCircle size={17} /> {!enrolled ? "Start course" : courseProgress && courseProgress.percent === 100 ? "Review course" : "Continue learning"}
-                </button>
-              )}
+              <div className="flex flex-wrap items-center gap-3">
+                {flat.length > 0 && (
+                  <button onClick={() => open(firstOpen.item.id)} className="inline-flex h-11 items-center gap-2 rounded-xl bg-herb-green px-5 text-sm font-semibold text-white shadow-[0_1px_2px_rgba(15,23,42,0.12)] transition-colors duration-150 hover:bg-herb-green/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-herb-green/40 focus-visible:ring-offset-2">
+                    <PlayCircle size={17} /> {!enrolled ? "Start course" : courseProgress && courseProgress.percent === 100 ? "Review course" : "Continue learning"}
+                  </button>
+                )}
+                <RatingBadge rating={rating} />
+              </div>
             </div>
           </div>
-          <div className="order-1 md:order-2">
-            {course.thumbnailUrl ? <img src={course.thumbnailUrl} alt="" className="h-full max-h-80 w-full object-cover md:max-h-none" /> : <div className="flex h-full min-h-40 items-center justify-center bg-gradient-to-br from-copper/15 via-copper/5 to-herb-green/10"><PlayCircle size={40} className="text-copper/40" /></div>}
+          <div className="order-1 overflow-hidden rounded-t-2xl md:order-2 md:rounded-l-none md:rounded-r-2xl">
+            {course.thumbnailUrl ? <img src={course.thumbnailUrl} alt="" className="h-full max-h-80 w-full object-cover md:max-h-none" /> : <div className="flex h-full min-h-40 items-center justify-center bg-gradient-to-br from-slate-50 to-slate-100"><PlayCircle size={40} className="text-slate-300" /></div>}
           </div>
         </div>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-[300px_minmax(0,1fr)]">
-        <nav className="h-fit rounded-2xl border border-border/60 bg-white p-4 shadow-xs lg:sticky lg:top-4" aria-label="Course content">
-          <Outline sections={sections} progress={progress} selected={null} onOpen={open} />
+        <nav className="h-fit rounded-2xl border border-neutral-200/80 bg-white p-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)] lg:sticky lg:top-4" aria-label="Course content">
+          <Outline sections={sections} progress={progress} selected={null} onOpen={open} completion={completion} onCompletion={showCompletion} />
         </nav>
 
-        <div className="min-w-0 space-y-8 rounded-2xl border border-border/60 bg-white p-6 shadow-xs md:p-8">
+        <div className="min-w-0 space-y-6">
+        <div className="space-y-8 rounded-2xl border border-neutral-200/80 bg-white p-6 shadow-[0_1px_2px_rgba(15,23,42,0.04)] md:p-8">
           <div>
-            <h2 className="font-display text-lg font-bold text-foreground">About this course</h2>
-            {course.description ? <Paragraphs text={course.description} className="mt-3" /> : <p className="mt-2 text-sm text-muted-foreground">No description yet.</p>}
+            <h2 className="text-[17px] font-semibold tracking-[-0.01em] text-neutral-900">About this course</h2>
+            {course.description ? <Paragraphs text={course.description} className="mt-3" /> : <p className="mt-2 text-sm text-slate-500">No description yet.</p>}
           </div>
           {course.learningObjectives.length > 0 && (
             <div>
-              <h2 className="font-display text-lg font-bold text-foreground">What you will learn</h2>
+              <h2 className="text-[17px] font-semibold tracking-[-0.01em] text-neutral-900">What you will learn</h2>
               <ul className="mt-3 grid gap-2.5 sm:grid-cols-2">
                 {course.learningObjectives.map((o) => (
-                  <li key={o} className="flex gap-2.5 text-sm text-foreground/85"><Target size={16} className="mt-0.5 flex-shrink-0 text-herb-green" /> {o}</li>
+                  <li key={o} className="flex gap-2.5 text-sm leading-6 text-slate-700"><Target size={16} className="mt-1 flex-shrink-0 text-copper" aria-hidden /> {o}</li>
                 ))}
               </ul>
             </div>
           )}
           <div>
-            <h2 className="font-display text-lg font-bold text-foreground">Course structure</h2>
+            <h2 className="text-[17px] font-semibold tracking-[-0.01em] text-neutral-900">Course structure</h2>
             <ol className="mt-3 space-y-2">
               {sections.map((s, si) => (
-                <li key={s.id} className="flex items-center gap-3 rounded-xl bg-neutral-50 px-4 py-3">
-                  <span className="flex h-7 w-7 items-center justify-center rounded-full bg-white text-xs font-bold text-copper ring-1 ring-border">{si + 1}</span>
-                  <span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-foreground">{s.title}</span>{s.description && <span className="block text-xs text-muted-foreground">{s.description}</span>}</span>
-                  <span className="text-xs text-muted-foreground">{s.items.length} {s.items.length === 1 ? "item" : "items"}</span>
+                <li key={s.id} className="flex items-center gap-3 rounded-xl border border-neutral-200/70 bg-neutral-50/60 px-4 py-3">
+                  <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg bg-white text-xs font-semibold text-herb-green ring-1 ring-inset ring-neutral-200">{si + 1}</span>
+                  <span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-neutral-900">{s.title}</span>{s.description && <span className="block text-xs text-slate-500">{s.description}</span>}</span>
+                  <span className="flex-shrink-0 rounded-md bg-white px-2 py-0.5 text-xs text-slate-500 ring-1 ring-inset ring-neutral-200/70">{s.items.length} {s.items.length === 1 ? "item" : "items"}</span>
                 </li>
               ))}
             </ol>
           </div>
+        </div>
+        {completion && completionHandlers && <CompletionPanel completion={completion} handlers={completionHandlers} />}
         </div>
       </div>
     </div>

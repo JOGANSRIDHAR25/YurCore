@@ -1,6 +1,6 @@
 import { SITE_NAME } from "@/shared/config/site";
 import { apiClient as rawClient } from "@/shared/api/api-client";
-import type { AdminCourse, AdminCourseDetails, ContentSettings, ContentType, LearnerRow, Quiz, ResponseRow, UploadKind } from "@/shared/learning/types";
+import type { AdminCertificateRow, AdminCourse, AdminCourseDetails, AdminLearningSettings, ContentSettings, ContentType, CourseFeedbackRow, DeliveryRow, LearnerRow, LearningCategory, Quiz, ResponseRow, UploadKind } from "@/shared/learning/types";
 
 export type { AdminCourse, AdminCourseDetails, ContentItem, Section, Quiz, QuizQuestion } from "@/shared/learning/types";
 
@@ -17,7 +17,16 @@ export type CourseInput = {
   durationMinutes: number | null;
   learningObjectives: string[];
   thumbnailPath?: string | null;
+  categoryIds?: string[];
+  credits?: number;
+  creditType?: "cme" | "participation";
+  feedbackEnabled?: boolean;
+  feedbackTitle?: string | null;
+  feedbackAllowComment?: boolean;
 };
+
+export type AdminCategory = LearningCategory & { courses: number };
+export type LearnerProgressRow = { userId: string; name: string; email: string | null; target: number; completed: number; remaining: number; percent: number; status: "target_met" | "on_track" | "behind" };
 
 export type ContentInput = {
   sectionId: string;
@@ -37,7 +46,23 @@ const json = (method: string, body?: unknown) => ({ method, body: body === undef
 
 export const adminLearningApi = {
   list: () => apiClient<{ data: AdminCourse[] }>(`${base}/courses`).then(unwrap),
-  categories: () => apiClient<{ data: string[] }>(`${base}/categories`).then(unwrap),
+  categories: () => apiClient<{ data: AdminCategory[] }>(`${base}/categories`).then(unwrap),
+  createCategory: (name: string) => apiClient<{ data: LearningCategory }>(`${base}/categories`, json("POST", { name })).then(unwrap),
+  updateCategory: (id: string, patch: { name?: string; active?: boolean }) => apiClient<{ data: LearningCategory }>(`${base}/categories/${id}`, json("PATCH", patch)).then(unwrap),
+  settings: () => apiClient<{ data: AdminLearningSettings }>(`${base}/settings`).then(unwrap),
+  updateSettings: (patch: Partial<Omit<AdminLearningSettings, "signatureUrl">>) => apiClient<{ data: AdminLearningSettings }>(`${base}/settings`, json("PATCH", patch)).then(unwrap),
+  setSignature: (dataUrl: string | null) => apiClient<{ data: AdminLearningSettings }>(`${base}/settings/signature`, json("PUT", { dataUrl })).then(unwrap),
+  certificates: (q?: string) => apiClient<{ data: AdminCertificateRow[] }>(`${base}/certificates`, { params: { q: q || undefined } }).then(unwrap),
+  revokeCertificate: (id: string, reason: string) => apiClient<{ data: AdminCertificateRow }>(`${base}/certificates/${id}/revoke`, json("POST", { reason })).then(unwrap),
+  reissueCertificate: (id: string, input: { reason: string; learnerName?: string }) => apiClient<{ data: AdminCertificateRow }>(`${base}/certificates/${id}/reissue`, json("POST", input)).then(unwrap),
+  certificateDownload: (id: string) => apiClient<{ data: { url: string } }>(`${base}/certificates/${id}/download`).then(unwrap),
+  learnerProgress: () => apiClient<{ data: { year: number; unit: string; rows: LearnerProgressRow[] } }>(`${base}/credits`).then(unwrap),
+  adjustCredits: (input: { userId: string; credits: number; reason: string; date?: string }) => apiClient(`${base}/credits`, json("POST", input)),
+  deliveries: (status?: string) => apiClient<{ data: DeliveryRow[] }>(`${base}/deliveries`, { params: { status: status || undefined } }).then(unwrap),
+  retryDelivery: (id: string) => apiClient(`${base}/deliveries/${id}/retry`, json("POST")),
+  runReminders: () => apiClient<{ data: { checked: number; sent: number; skipped: number } }>(`${base}/reminders`, json("POST")).then(unwrap),
+  courseFeedback: (id: string) => apiClient<{ data: { title: string; enabled: boolean; average: number | null; count: number; rows: CourseFeedbackRow[] } }>(`${c(id)}/feedback`).then(unwrap),
+  searchPractitioners: (q: string) => apiClient<{ data: { id: string; name: string }[] }>(`${base}/practitioners`, { params: { q } }).then(unwrap),
   details: (id: string) => apiClient<{ data: AdminCourseDetails }>(c(id)).then(unwrap),
   create: (input: CourseInput) => apiClient<{ data: AdminCourse }>(`${base}/courses`, json("POST", input)).then(unwrap),
   update: (id: string, input: Partial<CourseInput>) => apiClient<{ data: AdminCourse }>(c(id), json("PATCH", input)).then(unwrap),

@@ -4,10 +4,14 @@ import { AuthorizationError, NotFoundError, ValidationError } from "@/shared/api
 import type { AuthUser } from "@/shared/auth/auth.types";
 import { ROLES } from "@/shared/security/roles";
 import { isFileType, isQuizType } from "@/shared/learning/content";
-import type { AttemptResult, AttemptStart, ItemProgress, LearnerCourse, LearnerCourseCard, LearnerCourseDetails, LearnerCoursePage, LearnerState } from "@/shared/learning/types";
-import { LearningRepository, type AttemptRow, type ContentRow, type CourseCursor, type CourseRow, type QuizRow } from "../repo/learning.repo";
+import type { AttemptResult, AttemptStart, CourseCompletion, CourseRating, ItemProgress, LearnerCourse, LearnerCourseCard, LearnerCourseDetails, LearnerCoursePage, LearnerState } from "@/shared/learning/types";
+import { LearningRepository, type AttemptRow, type ContentRow, type CourseCardRow, type CourseCursor, type CourseRow, type CourseSort, type QuizRow } from "../repo/learning.repo";
+import { LearningProfileRepository } from "../repo/learning-profile.repo";
 import { FILE_URL_TTL, UUID, buildSections, summaries } from "./learning-common";
 import { LearningMoodleSync } from "./learning-moodle-sync.service";
+import { LearningCredentials } from "./learning-credentials.service";
+import { LearningNotify } from "./learning-notify.service";
+import { LearningProfileService } from "./learning-profile.service";
 
 /**
  * Practitioner-facing learning. Read/learn only: there is deliberately no create, edit,
@@ -22,6 +26,13 @@ const GRACE_MS = 2 * 60 * 1000;
 
 export const attemptSubmitSchema = z.object({ answers: z.record(z.string().regex(UUID), z.string().regex(UUID)).default({}) });
 export const responseSchema = z.object({ text: z.string().trim().max(20000).default(""), rating: z.number().int().min(1).max(5).nullable().optional() });
+export const courseFeedbackSchema = z.object({
+  rating: z.number({ error: "Choose a rating from 1 to 5" }).int("Choose a rating from 1 to 5").min(1, "Choose a rating from 1 to 5").max(5, "Choose a rating from 1 to 5"),
+  comment: z.string().trim().max(5000, "Your comment is too long").default(""),
+});
+
+/** The default course feedback title when the admin has not set one: always follows the current course title. */
+export const feedbackTitleFor = (course: Pick<CourseRow, "title" | "feedback_title">) => course.feedback_title?.trim() || `${course.title} — Course Feedback`;
 
 const expired = (a: AttemptRow, limit: number | null) => limit !== null && Date.now() > new Date(a.started_at).getTime() + limit * 60000 + GRACE_MS;
 
@@ -31,14 +42,15 @@ export const LIST_PAGE_MAX = 48;
 
 /** The cursor is opaque to clients: base64url JSON of the last card's sort key. Anything malformed is rejected. */
 export function encodeCursor(c: CourseCursor): string {
-  return Buffer.from(JSON.stringify([c.publishedAt, c.id])).toString("base64url");
+  return Buffer.from(JSON.stringify(c.sort && c.sort !== "published" ? [c.publishedAt, c.id, c.sort] : [c.publishedAt, c.id])).toString("base64url");
 }
 export function decodeCursor(raw: string | null | undefined): CourseCursor | null {
   if (!raw) return null;
   try {
-    const [publishedAt, id] = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as unknown[];
+    const [publishedAt, id, sort = "published"] = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as unknown[];
     const validDate = publishedAt === null || (typeof publishedAt === "string" && publishedAt.length <= 40 && !Number.isNaN(Date.parse(publishedAt)) && /^[0-9T:.+\-Z ]+$/.test(publishedAt));
-    if (typeof id === "string" && UUID.test(id) && validDate) return { publishedAt: publishedAt as string | null, id };
+    const validSort = sort === "published" || sort === "newest" || sort === "oldest";
+    if (typeof id === "string" && UUID.test(id) && validDate && validSort) return sort === "published" ? { publishedAt: publishedAt as string | null, id } : { publishedAt: publishedAt as string | null, id, sort: sort as CourseSort };
   } catch { /* fall through */ }
   throw new ValidationError("Invalid page cursor");
 }
@@ -91,7 +103,26 @@ export class LearningService {
     const done = new Set(progress.map((p) => p.content_id));
     const complete = content.length > 0 && content.every((c) => done.has(c.id));
     if (complete && !enrollment.completed_at) await LearningRepository.setCompleted(courseId, userId, new Date().toISOString());
-    if (!complete && enrollment.completed_at) await LearningRepository.setCompleted(courseId, userId, null);
+    // A completion is never undone once the certificate exists (the certificate and its credits stand).
+    if (!complete && enrollment.completed_at && !(await LearningProfileRepository.getCertificateFor(userId, courseId))) await LearningRepository.setCompleted(courseId, userId, null);
+    if (complete) await this.issueIfEligible(courseId, userId);
+  }
+
+  /**
+   * Issues the certificate (and credits) as soon as every rule is met. The database re-checks completion and
+   * feedback under a lock, so this is safe to call repeatedly and concurrently. PDF, emails and the target check
+   * run after the response.
+   */
+  private static async issueIfEligible(courseId: string, userId: string) {
+    try {
+      const r = await LearningCredentials.issueIfEligible(userId, courseId);
+      if (r.created && r.certificate) LearningNotify.scheduleCertificateIssued(r.certificate.id);
+      return r;
+    } catch (err) {
+      // Completion is already stored; issuing is retried on the next course visit.
+      console.error("[learning] certificate issue failed:", err instanceof Error ? err.message : err);
+      return null;
+    }
   }
 
   // ---------- queries ----------
@@ -99,29 +130,51 @@ export class LearningService {
    * One batch of the learner's catalogue. Filters (scope, search, category) are applied in the database before
    * paging, and only the batch's courses get counts, progress, instructors and signed thumbnail URLs.
    */
-  static async list(user: AuthUser, scope: ScopeFilter, filters: { q?: string; category?: string }, page: { limit?: number; cursor?: string | null } = {}): Promise<LearnerCoursePage> {
+  static async list(
+    user: AuthUser,
+    scope: ScopeFilter,
+    filters: { q?: string; category?: string; categoryIds?: string[]; sort?: CourseSort },
+    page: { limit?: number; cursor?: string | null } = {},
+  ): Promise<LearnerCoursePage> {
     await this.requirePractitioner(user);
     const limit = Math.min(Math.max(Math.trunc(page.limit ?? LIST_PAGE_SIZE), 1), LIST_PAGE_MAX);
     const cursor = decodeCursor(page.cursor);
+    const sort = filters.sort ?? "published";
+    if (cursor && (cursor.sort ?? "published") !== sort) throw new ValidationError("Invalid page cursor");
     // Courses created or changed in Moodle are picked up in the background (at most every few minutes).
     if (!cursor) LearningMoodleSync.scheduleRefresh(null);
 
     const enrollments = await LearningRepository.listUserEnrollments(user.id);
-    const scoped = scope === "all" ? undefined : enrollments.filter((e) => scope === "mine" || e.completed_at).map((e) => e.course_id);
+    // My Learning = started and not yet completed; completed courses live only under Completed Courses.
+    let scoped = scope === "all" ? undefined : enrollments.filter((e) => (scope === "mine" ? !e.completed_at : Boolean(e.completed_at))).map((e) => e.course_id);
+    // Category filter (any of the chosen categories). An explicit filter never falls back to other courses.
+    if (filters.categoryIds?.length) {
+      const inCategories = new Set(await LearningProfileRepository.courseIdsInCategories(filters.categoryIds));
+      scoped = (scoped ?? [...inCategories]).filter((id) => inCategories.has(id));
+    }
     if (scoped && scoped.length === 0) return { items: [], nextCursor: null, hasMore: false, total: cursor ? null : 0 };
 
-    const { rows, hasMore, total } = await LearningRepository.listPublishedCoursePage({ ...filters, ids: scoped, cursor, limit, withTotal: !cursor });
+    const { rows, hasMore, total } = await LearningRepository.listPublishedCoursePage({ q: filters.q, category: filters.category, ids: scoped, cursor, limit, withTotal: !cursor, sort });
+    const items = await this.cards(user.id, rows, enrollments);
+    const last = rows.at(-1);
+    const key = last ? (sort === "published" ? last.published_at : last.created_at) : null;
+    return { items, hasMore, nextCursor: hasMore && last ? encodeCursor({ publishedAt: key, id: last.id, sort }) : null, total };
+  }
+
+  /** Card DTOs for a batch: counts, progress, instructors and signed thumbnail URLs for those courses only. */
+  private static async cards(userId: string, rows: CourseCardRow[], enrollments: Awaited<ReturnType<typeof LearningRepository.listUserEnrollments>>): Promise<LearnerCourseCard[]> {
     const ids = rows.map((r) => r.id);
-    const [content, progress, instructors, thumbs] = await Promise.all([
+    const [content, progress, instructors, thumbs, ratings] = await Promise.all([
       LearningRepository.listContentIds(ids),
-      LearningRepository.listUserProgress(user.id, ids),
+      LearningRepository.listUserProgress(userId, ids),
       LearningRepository.getPractitioners([...new Set(rows.map((r) => r.instructor_id).filter((x): x is string => Boolean(x)))]),
       LearningRepository.signedUrls(rows.map((r) => r.thumbnail_path ?? ""), FILE_URL_TTL).catch(() => new Map<string, string>()),
+      ratingsFor(ids),
     ]);
     const done = new Set(progress.map((p) => p.content_id));
     const enrolled = new Map(enrollments.map((e) => [e.course_id, e]));
 
-    const items = rows.map<LearnerCourseCard>((r) => {
+    return rows.map<LearnerCourseCard>((r) => {
       const e = enrolled.get(r.id);
       const own = content.filter((x) => x.course_id === r.id);
       const completed = own.filter((x) => done.has(x.id)).length;
@@ -136,15 +189,28 @@ export class LearningService {
         items: own.length,
         thumbnailUrl: r.thumbnail_path ? thumbs.get(r.thumbnail_path) ?? null : null,
         instructorName: r.instructor_id ? instructors.get(r.instructor_id)?.full_name ?? null : null,
+        credits: Number(r.credits ?? 0),
+        creditType: r.credit_type ?? "cme",
+        createdAt: r.created_at,
+        rating: ratings?.get(r.id) ?? null,
         enrolled: Boolean(e),
         state,
         progress: e ? { completed, total: own.length, percent: own.length ? Math.round((completed / own.length) * 100) : 0 } : null,
       };
     });
-    const last = rows.at(-1);
-    return { items, hasMore, nextCursor: hasMore && last ? encodeCursor({ publishedAt: last.published_at, id: last.id }) : null, total };
   }
 
+  /** "Recommended for You" cards (see LearningProfileService.recommendations for the ranking). */
+  static async recommended(user: AuthUser): Promise<LearnerCourseCard[]> {
+    const { ids, interestCourses } = await LearningProfileService.recommendations(user);
+    if (ids.length === 0) return [];
+    const [rows, enrollments] = await Promise.all([LearningRepository.listPublishedCards({ ids: ids.map((x) => x.id), limit: ids.length }), LearningRepository.listUserEnrollments(user.id)]);
+    const order = new Map(ids.map((x, i) => [x.id, i]));
+    const cards = await this.cards(user.id, rows.sort((a, b) => order.get(a.id)! - order.get(b.id)!), enrollments);
+    return cards.map((c) => ({ ...c, matchesInterests: interestCourses.has(c.id) }));
+  }
+
+  /** Category names for the catalogue's category dropdown (primary categories of published courses). */
   static async categories(user: AuthUser): Promise<string[]> {
     await this.requirePractitioner(user);
     return LearningRepository.categories(true);
@@ -153,10 +219,11 @@ export class LearningService {
   static async getDetails(user: AuthUser, courseId: string): Promise<LearnerCourseDetails> {
     await this.requirePractitioner(user);
     const row = await this.loadPublished(courseId);
-    const [{ list, sections: sectionRows, content }, enrollment, progressRows] = await Promise.all([
+    const [{ list, sections: sectionRows, content }, enrollment, progressRows, ratings] = await Promise.all([
       summaries([row]),
       LearningRepository.getEnrollment(courseId, user.id),
       LearningRepository.listProgress({ userId: user.id, courseIds: [courseId] }),
+      ratingsFor([courseId]),
     ]);
     const { sections, quizzes } = await buildSections(sectionRows, content, { withQuestions: false });
     const quizByContent = new Map([...quizzes].map(([cid, q]) => [cid, q]));
@@ -184,9 +251,32 @@ export class LearningService {
     const completed = content.filter((c) => done.has(c.id)).length;
     const state: LearnerState = !enrollment ? "not_started" : enrollment.completed_at ? "completed" : "in_progress";
     return {
-      course: { ...list[0], enrolled: Boolean(enrollment), state, progress: enrollment ? { completed, total, percent: total ? Math.round((completed / total) * 100) : 0 } : null },
+      course: { ...list[0], enrolled: Boolean(enrollment), state, rating: ratings?.get(courseId) ?? null, progress: enrollment ? { completed, total, percent: total ? Math.round((completed / total) * 100) : 0 } : null },
       sections,
       progress,
+      completion: await this.completion(row, user.id, Boolean(enrollment?.completed_at) && total > 0 && completed === total),
+    };
+  }
+
+  /** What the learner still needs before the certificate. Issues it now if everything is met but it is missing (e.g. a failed earlier attempt). */
+  private static async completion(row: CourseRow, userId: string, contentComplete: boolean): Promise<CourseCompletion> {
+    const [feedback, existing] = await Promise.all([LearningProfileRepository.getFeedback(row.id, userId), LearningProfileRepository.getCertificateFor(userId, row.id)]);
+    let cert = existing;
+    const feedbackDone = !row.feedback_enabled || Boolean(feedback);
+    if (contentComplete && feedbackDone && !cert) cert = (await this.issueIfEligible(row.id, userId))?.certificate ?? null;
+    const stage: CourseCompletion["stage"] = cert ? (cert.status === "revoked" ? "revoked" : "issued") : !contentComplete ? "in_progress" : !feedbackDone ? "feedback_required" : "issuing";
+    return {
+      contentComplete,
+      credits: Number(row.credits ?? 0),
+      creditType: row.credit_type ?? "cme",
+      feedback: {
+        enabled: row.feedback_enabled,
+        title: feedbackTitleFor(row),
+        allowComment: row.feedback_allow_comment,
+        submitted: feedback ? { rating: feedback.rating, comment: feedback.comment, submittedAt: feedback.submitted_at } : null,
+      },
+      certificate: cert ? LearningCredentials.toDto(cert) : null,
+      stage,
     };
   }
 
@@ -273,6 +363,41 @@ export class LearningService {
     await LearningRepository.saveResponse({ course_id: courseId, content_id: contentId, user_id: user.id, response_text: parsed.data.text, rating: wantsRating ? parsed.data.rating ?? null : null });
     await LearningRepository.markComplete(courseId, contentId, user.id);
     await this.syncCompletion(courseId, user.id);
+  }
+
+  /**
+   * Course-level feedback (configured by the admin per course, separate from course content). Available once
+   * all course content is complete; the rating is required, the comment optional. Submitting it is what unlocks
+   * the certificate when feedback is enabled. One feedback per learner per course: a resubmission revises it.
+   */
+  static async submitFeedback(user: AuthUser, courseId: string, input: unknown): Promise<CourseCompletion> {
+    await this.requirePractitioner(user);
+    const row = await this.loadPublished(courseId);
+    if (!row.feedback_enabled) throw new ValidationError("Feedback is not enabled for this course");
+    const parsed = courseFeedbackSchema.safeParse(input);
+    if (!parsed.success) throw new ValidationError(parsed.error.issues[0]?.message ?? "Invalid feedback");
+    const [content, progress, enrollment] = await Promise.all([
+      LearningRepository.listContent([courseId]),
+      LearningRepository.listProgress({ userId: user.id, courseIds: [courseId] }),
+      LearningRepository.getEnrollment(courseId, user.id),
+    ]);
+    const done = new Set(progress.map((p) => p.content_id));
+    const contentComplete = Boolean(enrollment) && content.length > 0 && content.every((c) => done.has(c.id));
+    if (!contentComplete) throw new ValidationError("Complete all course content before giving feedback");
+    const comment = row.feedback_allow_comment ? parsed.data.comment : "";
+    await LearningProfileRepository.saveFeedback(courseId, user.id, parsed.data.rating, comment);
+    await this.syncCompletion(courseId, user.id);
+    return this.completion(row, user.id, true);
+  }
+}
+
+/** Rating aggregates for a batch of courses; null (shown as no rating at all) if they cannot be loaded, so a ratings problem never breaks the catalogue. */
+async function ratingsFor(courseIds: string[]): Promise<Map<string, CourseRating> | null> {
+  try {
+    return await LearningProfileRepository.courseRatings(courseIds);
+  } catch (err) {
+    console.error("[learning] course ratings unavailable:", err instanceof Error ? err.message : err);
+    return null;
   }
 }
 

@@ -71,3 +71,53 @@ There is no application limit on the number or size of videos, images or documen
 1. Run the migration in the Supabase SQL editor (creates tables and the `learning` bucket).
 2. Run `supabase/migrations/20261014000000_learning_moodle_sync.sql` (content sync columns).
 3. Moodle: the `local_meyveda` plugin installed and registered (`docs/MOODLE_INTEGRATION.md` § 5), file upload/download enabled for the service, and a valid `MOODLE_WS_TOKEN` (Site administration → Server → Web services → Manage tokens; user admin, service AyurLLM) plus `MOODLE_BASE_URL` in `.env.local`. PHP `upload_max_filesize` / `post_max_size` limit the largest video that can be sent to Moodle.
+
+## Learning profile, credits, feedback and certificates (migration `20261028000000_learning_credits_certificates.sql`)
+
+Functional reference: *AyurLearn LMS — Certificates, Credits & Learning Profile Spec* (27 Oct 2026). Regulatory reference: NCISM *Continuous Medical Education Guidelines* (30 Aug 2024).
+
+### What the CME guidelines do and do not say
+- **Verified:** 50 credit points within the 5 years before each registration renewal (reg. 7(8)), phased in: renewals due 1 Mar 2025 – 28 Feb 2026 need 10, then 20, 30, 40, and 50 from 1 Mar 2029. One online elective per year carries 10 points. Online modules of 3 to under 6 hours are tentatively 5 points, 6 hours or more 10 points. Points are "at the sole discretion of the Board of Ethics & Registration". No certificate before completion. Practitioners over 70 are exempt.
+- **Not prescribed:** an *annual* target, a reminder schedule, a certificate number format. So the annual target default (10, derived from 50 / 5 years) and minimum (10) are **admin settings**, not regulatory values; reminders are configurable. YurCore certificates never claim NCISM accreditation; an accreditation line is printed only if an admin enters one.
+- `ayurvidya.aiia.gov.in` could not be inspected (its TLS certificate was rejected), so nothing here is based on it.
+
+### Practitioner flow
+`YurCore Learning` (sidebar) → **Learning Setup** until the learner has ≥ 1 interest (max 3, from the admin's active categories) and has confirmed **this credit year's target** (≥ admin minimum) → **Continue to Learning** saves both, then shows the catalogue. At the start of a new credit year the setup screen asks to confirm the target again (interests are pre-filled).
+Catalogue: target summary (server-computed), **Recommended for You** (interests first, then courses whose credits best close the remaining gap, then newest), search + category + **Filters & Sorting** (Sort: Newest/Oldest by `created_at`, stable on id; Top 3 Favorite Categories: any-of). Tabs: All / My Learning / Completed / Certificates / Learning Profile.
+Course page: after the content, the course **Feedback** module (when enabled; unlocks once all content is complete; 1–5 rating required, comment optional) and the **certificate** card.
+
+### Rules (all enforced on the server)
+| Rule | Where |
+|---|---|
+| Certificate + credits issued together, once per learner per course, only when all content is complete and (if enabled) feedback submitted | `meyveda_learning_issue_certificate()` (one transaction, enrollment row locked, unique `(user_id, course_id)`) |
+| Number `AYL-YYYY-NNNNNN` (issue year, IST), never reused | per-year counter table + unique constraint |
+| Credits = course credit value at completion; later edits don't change past awards | snapshot on certificate + ledger row |
+| Ledger append-only; revoke = new negative row (`reverses_id`), dated like the original so it reduces that year | trigger + `meyveda_learning_revoke_certificate()` |
+| Credit year: calendar year in IST by default (admin can set the start month); a completion at 23:30 IST on 31 Dec counts for that year | `src/shared/learning/credits.ts` (unit-tested, incl. the spec's 27 Oct 2026 worked example) |
+| completed / remaining / % / days remaining (today not counted) / pace (30-day months) / status | `computeTargetProgress` |
+| Target cannot go below the admin minimum; stored per (learner, credit year) | `LearningProfileService` |
+
+### Emails and in-app notifications
+Sent through the existing `send-email` edge function (Gmail SMTP). Set its secrets so mail is sent **from admin.meyveda@gmail.com**: `GMAIL_USER=admin.meyveda@gmail.com` and `GMAIL_APP_PASSWORD=<Google app password>` (Supabase → Edge Functions → Secrets; never in the repo or `NEXT_PUBLIC_*`). Each email also creates a row in the existing `notifications` table (type `learning`, deep link to the course / certificate / profile).
+- **New course** — when a course is published (or made visible in Moodle) to learners whose interests include one of its categories; once per learner per course.
+- **Course completed** — after the certificate is issued; links to `/pro/learning/certificates?download=<id>` and the public verify page.
+- **Target met** — once per learner, credit year and target value.
+- **Target reminder** — monthly and/or at N days before year end (admin settings); never once the target is met; once per period.
+Every send is recorded in `meyveda_learning_deliveries` (unique dedupe key, status, attempts, error). Admin → Learning settings → Emails & reminders lists them and can retry failed ones.
+
+### Environment
+- `APP_BASE_URL` — public origin used in emails and QR codes (e.g. `https://app.yurcore.in`). Falls back to `NEXT_PUBLIC_APP_URL`; **must not be localhost in production**.
+- `LEARNING_CRON_SECRET` — enables `POST /api/learning/jobs/reminders` (`Authorization: Bearer <secret>`). Schedule it daily (Supabase cron + `pg_net`, Vercel cron, or any scheduler). Reminders also run opportunistically (at most every 6 h per server) while learners use the app, and from the admin "Run reminders now" button; all paths are idempotent.
+
+### Setup / backfill
+1. Run `supabase/migrations/20261028000000_learning_credits_certificates.sql`. Existing free-text categories become managed categories and courses are tagged with them; existing courses get **0 credits** (historical values cannot be reconstructed), feedback disabled.
+2. Admin → Learning settings: review categories, default/minimum target, issuer details (signatory and signature are optional; leave the accreditation statement empty unless an approval exists).
+3. Set credits (and feedback) per course in the course details form / Feedback tab.
+4. Set the email secrets and `APP_BASE_URL`, and schedule the reminder job.
+
+Existing Feedback content items keep working; new feedback is configured per course (Feedback tab), so Feedback is no longer offered in *Add content*.
+
+## Course ratings and certificate email attachment (migration 20261029000000)
+
+- **Ratings** come only from course feedback (`meyveda_learning_course_feedback`, one rating per learner per course, 1–5). `meyveda_learning_course_ratings(uuid[])` counts them in the database for a whole batch of cards in one call (no per-card queries, no API row-limit truncation); deactivated accounts are excluded. Average = sum / count, rounded to one decimal; a course with no ratings shows "No ratings yet". Nothing is stored, so a new or revised feedback shows on the next read. The same aggregate feeds the catalogue cards, the recommendations carousel and the course page. If the function is missing, ratings are hidden rather than shown as zero.
+- **Certificate email**: the "Course Completed" email now carries the certificate PDF as an attachment (`YurCore_Certificate_<number>.pdf`, via the same `send-email` attachment field the invoice email uses) and keeps the Verify Certificate link. The PDF is rendered or reused from storage and checked (`%PDF-` header, `%%EOF` trailer) before sending; if it cannot be produced, nothing is sent and the delivery is marked failed so Admin → Learning settings → Deliveries → Retry can resend it. Revoked certificates are never emailed.

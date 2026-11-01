@@ -4,7 +4,7 @@ import { SITE_NAME } from "@/shared/config/site";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { toast } from "react-hot-toast";
-import { BookOpen, Eye, GraduationCap, Pencil, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
+import { BookOpen, Eye, GraduationCap, Pencil, Plus, RefreshCw, Search, Settings2, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useQuery } from "@/hooks/useQuery";
 import { LEVEL_LABEL } from "@/shared/learning/content";
@@ -64,6 +64,7 @@ export default function AdminLearningPage() {
           <button onClick={syncAll} disabled={syncing} className={ghostBtn} title="Import courses created in Moodle and send course content to Moodle">
             <RefreshCw size={15} className={cn(syncing && "animate-spin")} /> {syncing ? "Syncing with Moodle…" : "Sync with Moodle"}
           </button>
+          <Link href="/admin/learning/settings" className={ghostBtn} title="Categories, targets, certificates, credits and learning emails"><Settings2 size={15} /> Learning settings</Link>
           <Link href="/admin/learning/new" className={primaryBtn}><Plus size={16} /> Create course</Link>
         </div>
       </div>

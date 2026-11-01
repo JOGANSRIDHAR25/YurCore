@@ -95,7 +95,8 @@ export async function apiClient<T>(
             window.location.href = "/admin";
           }
         } else if (!path.startsWith("/login") && !path.startsWith("/onboarding")) {
-          window.location.href = "/login";
+          // Keep the intended page so login can return there (e.g. a course opened from an email).
+          window.location.href = `/login?next=${encodeURIComponent(path + window.location.search)}`;
         }
       }
     }

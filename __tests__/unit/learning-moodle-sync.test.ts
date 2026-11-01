@@ -5,6 +5,7 @@ vi.mock("@/shared/db/supabase.server", () => ({ createClient: () => { throw new 
 
 import { LearningAdminService } from "@/backend/service/learning-admin.service";
 import { LearningRepository, type CourseRow } from "@/backend/repo/learning.repo";
+import { LearningProfileRepository } from "@/backend/repo/learning-profile.repo";
 import { Moodle } from "@/backend/integration/moodle/moodle.service";
 import { MoodleError } from "@/backend/integration/moodle/moodle.client";
 import type { AuthUser } from "@/shared/auth/auth.types";
@@ -15,6 +16,7 @@ const row = (over: Partial<CourseRow> = {}): CourseRow => ({
   id: ID, moodle_course_id: 42, title: "Ayurveda", short_description: "", description: "", category_name: null, level: null, instructor_id: null,
   duration_minutes: null, learning_objectives: [], thumbnail_path: null, status: "draft", published_at: null, created_by: admin.id,
   origin: "yurcore", moodle_synced_at: null, moodle_sync_error: null, moodle_image_sig: null,
+  credits: 0, credit_type: "cme", feedback_enabled: false, feedback_title: null, feedback_allow_comment: true,
   created_at: "2026-09-26T00:00:00Z", updated_at: "2026-09-26T00:00:00Z", ...over,
 });
 
@@ -65,6 +67,8 @@ describe("course creation", () => {
     vi.spyOn(LearningRepository, "signedUrls").mockResolvedValue(new Map());
     vi.spyOn(LearningRepository, "getUserEmails").mockResolvedValue(new Map());
     vi.spyOn(LearningRepository, "listEnrollments").mockResolvedValue([]);
+    vi.spyOn(LearningProfileRepository, "courseCategoryIds").mockResolvedValue(new Map());
+    vi.spyOn(LearningProfileRepository, "getCategories").mockResolvedValue([]);
 
     const course = await LearningAdminService.createCourse(admin, { title: "Ayurveda basics" });
     expect(Moodle.createCourse).toHaveBeenCalledWith(expect.objectContaining({ fullname: "Ayurveda basics", visible: false }));
