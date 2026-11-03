@@ -226,6 +226,12 @@ export default function LoginPage() {
     return () => clearInterval(interval);
   }, []);
 
+  // Coming from "Create account" with an email that already has an account: pre-fill it.
+  useEffect(() => {
+    const fromLink = new URLSearchParams(window.location.search).get("email")?.trim().toLowerCase();
+    if (fromLink && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(fromLink)) setEmail(fromLink);
+  }, []);
+
   // Redirect users who are already logged in.
   useEffect(() => {
     if (authLoading || !user) {

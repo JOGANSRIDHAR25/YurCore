@@ -1,3 +1,4 @@
+import { redirect } from "next/navigation";
 import { getAuthUserFromCookies } from "@/shared/auth/get-auth-user-server";
 import { AssistantRepository } from "@/backend/repo/assistant.repo";
 import { AssistantGate } from "./_components/AssistantGate";
@@ -28,6 +29,12 @@ export default async function ProLayout({ children }: { children: React.ReactNod
         initialRejectionReason={assistant?.rejectionReason ?? null}
       />
     );
+  }
+
+  // Approved, but the profile is not filled in yet: send them to complete it before using the dashboard. This runs
+  // on the first render after approval (the gate refreshes) and on every later visit until the profile is saved.
+  if (!(await AssistantRepository.isProfileComplete(authUser.id))) {
+    redirect("/profile/create-profile");
   }
 
   return <>{children}</>;

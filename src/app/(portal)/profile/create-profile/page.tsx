@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import { toast } from "react-hot-toast";
 import {
   AlertCircle,
+  CheckCircle2,
   Plus,
   X,
   User,
@@ -72,6 +73,8 @@ export default function CreateProfilePage() {
 
   // Assistant-only fields
   const [linkedDoctorName, setLinkedDoctorName] = useState("");
+  /** Assistant whose saved profile was incomplete when the page loaded (e.g. just approved by their doctor). */
+  const [assistantFirstSetup, setAssistantFirstSetup] = useState(false);
 
   // Doctor-only fields
   const [hprId, setHprId] = useState("");
@@ -111,6 +114,7 @@ export default function CreateProfilePage() {
           setGender(data.gender || "");
           setBloodGroup(data.bloodGroup || "");
           setLinkedDoctorName(data.linkedDoctorName || "");
+          setAssistantFirstSetup(!(data.dob && data.gender && data.bloodGroup));
         })
         .catch(() => { })
         .finally(() => setLoading(false));
@@ -422,7 +426,8 @@ export default function CreateProfilePage() {
       }
 
       toast.success("Profile updated successfully!");
-      router.push("/profile");
+      // Assistants go to the practitioner dashboard (the /pro layout keeps them here until the profile is complete).
+      router.push(isAssistant ? "/pro" : "/profile");
     } catch (err: any) {
       console.error("Create profile error:", err);
       setError(err.message || "Failed to save profile.");
@@ -898,7 +903,16 @@ export default function CreateProfilePage() {
         </div>
 
         <h1 className="font-display text-xl font-semibold text-slate-900 mb-1">Create Your Assistant Profile</h1>
-        <p className="text-sm text-slate-500 mb-7">Your account details and the profile info your doctor can see.</p>
+        <p className="text-sm text-slate-500 mb-5">Your account details and the profile info your doctor can see.</p>
+        {assistantFirstSetup && (
+          <div className="mb-6 flex items-start gap-3 rounded-2xl border border-emerald-200 bg-emerald-50/70 px-4 py-3.5" role="status">
+            <CheckCircle2 className="mt-0.5 h-5 w-5 flex-shrink-0 text-emerald-600" aria-hidden />
+            <div className="text-sm">
+              <p className="font-semibold text-emerald-900">{linkedDoctorName ? `${linkedDoctorName} approved your access` : "Your access has been approved"}</p>
+              <p className="mt-0.5 text-emerald-800/90">Fill in your date of birth, gender and blood group, then save to open your dashboard.</p>
+            </div>
+          </div>
+        )}
 
         <div className="space-y-5">
           <div className="bg-white rounded-2xl border border-slate-100 shadow-[0_1px_3px_rgba(30,41,59,0.04)] p-6 sm:p-7">

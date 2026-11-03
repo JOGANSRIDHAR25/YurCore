@@ -36,7 +36,7 @@ export async function checkAccount(req: NextRequest) {
  * Triggers the Supabase Edge Function to send an OTP via Email/SMS.
  */
 export async function sendOtp(req: NextRequest) {
-  const { email } = await req.json();
+  const { email, intent } = await req.json();
 
   if (!email) {
     return errorResponse("Email is required", 400);
@@ -62,6 +62,15 @@ export async function sendOtp(req: NextRequest) {
 
   // Cast to any — database types are not yet generated
   const supabase: any = createClient();
+
+  // Create-account flow: an existing account must sign in instead, so no OTP is created or emailed for it.
+  // The sign-in page does not send an intent and is unaffected.
+  if (intent === "signup") {
+    const { data: existing } = await supabase.from("users").select("id").eq("email", normalizedEmail).maybeSingle();
+    if (existing) {
+      return errorResponse("An account with this email already exists. Please sign in instead.", 409);
+    }
+  }
 
   // Try calling Supabase Edge function
   const { data, error } = await supabase.functions.invoke("send-otp", {

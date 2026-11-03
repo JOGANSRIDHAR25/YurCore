@@ -62,7 +62,7 @@ export class AvailabilityService {
     return AvailabilityRepository.getBlockedDates(practitionerId);
   }
   static async getCalendarAvailability(
-  userId: string,
+  authUser: AuthUser,
   startDate: string,
   endDate: string,
 ): Promise<CalendarAvailabilityRow[]> {
@@ -70,16 +70,8 @@ export class AvailabilityService {
     return [];
   }
 
-  const practitionerId =
-    await AvailabilityRepository.getPractitionerIdFromUserId(
-      userId,
-    );
-
-  if (!practitionerId) {
-    throw new ForbiddenError(
-      "Practitioner profile not found",
-    );
-  }
+  // Doctors act on their own calendar; approved assistants on their linked doctor's.
+  const practitionerId = await assertPractitioner(authUser);
 
   return AvailabilityRepository.getCalendarAvailability(
     practitionerId,
@@ -89,19 +81,10 @@ export class AvailabilityService {
 }
 
 static async updateCalendarAvailability(
-  userId: string,
+  authUser: AuthUser,
   availabilityData: CalendarAvailabilityRow[],
 ): Promise<void> {
-  const practitionerId =
-    await AvailabilityRepository.getPractitionerIdFromUserId(
-      userId,
-    );
-
-  if (!practitionerId) {
-    throw new ForbiddenError(
-      "Practitioner profile not found",
-    );
-  }
+  const practitionerId = await assertPractitioner(authUser);
 
   await AvailabilityRepository.updateCalendarAvailability(
     practitionerId,

@@ -316,7 +316,7 @@ export async function getCalendarAvailabilityController(
 
     const data =
       await AvailabilityService.getCalendarAvailability(
-        authUser.id,
+        authUser,
         startDate,
         endDate,
       );
@@ -373,7 +373,7 @@ export async function updateCalendarAvailabilityController(
     }
 
     await AvailabilityService.updateCalendarAvailability(
-      authUser.id,
+      authUser,
       availabilityData,
     );
 

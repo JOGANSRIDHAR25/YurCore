@@ -73,18 +73,33 @@ export default function OnboardingPage() {
     }, 1000);
   }
 
+  /** Existing accounts sign in on the sign-in page (email carried over); no OTP is sent from here. */
+  function goToSignIn() {
+    router.push(`/login?email=${encodeURIComponent(email.trim().toLowerCase())}`);
+  }
+
   async function handleSendOTP() {
     if (!email) return;
+    if (accountExists) {
+      goToSignIn();
+      return;
+    }
     setLoading(true);
     setError("");
     try {
+      // intent "signup": the server refuses (409, nothing sent) if an account already exists for this email,
+      // even if the on-blur check above has not finished yet.
       const res = await fetch("/api/auth/send-otp/", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({ email, intent: "signup" }),
       });
 
       const data = await res.json();
+      if (res.status === 409) {
+        setAccountExists(true);
+        return;
+      }
       if (!res.ok) throw new Error(data.error || "Failed to send OTP.");
 
       startResendTimer();
@@ -430,7 +445,7 @@ export default function OnboardingPage() {
 
               {accountExists && (
                 <div className="bg-blue-50 border border-blue-200 rounded-xl px-3.5 py-2.5 text-sm text-blue-700 w-full max-w-[400px] text-left">
-                  An account with this email already exists.
+                  An account with this email already exists. Sign in to continue; no verification code has been sent.
                 </div>
               )}
 
@@ -446,7 +461,7 @@ export default function OnboardingPage() {
                 disabled={!email || !email.includes("@")}
                 className="w-full max-w-[400px] h-[52px] rounded-[14px] bg-gradient-to-r from-[#3B5BFF] to-[#A855F7] text-white text-base font-semibold flex items-center justify-center gap-2 transition-all duration-300 ease-out hover:-translate-y-0.5 hover:shadow-lg hover:shadow-purple-500/25 active:translate-y-0 active:shadow-md cursor-pointer focus:outline-none focus-visible:ring-4 focus-visible:ring-purple-500/30 disabled:opacity-50 disabled:cursor-not-allowed group"
               >
-                {loading ? "Sending OTP..." : accountExists ? "Sign In" : "Continue"}
+                {loading ? "Sending OTP..." : accountExists ? "Go to Sign In" : "Continue"}
                 {!loading && (
                   <svg className="w-4 h-4 transition-transform duration-300 group-hover:translate-x-1" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14M12 5l7 7-7 7" />

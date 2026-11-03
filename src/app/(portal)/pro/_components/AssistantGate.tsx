@@ -16,10 +16,10 @@ const POLL_MS = 6000;
 /**
  * Renders the "waiting for approval" / "declined" / "suspended" screen for
  * an assistant, and polls in the background so that once the linked doctor
- * approves them, they land on the practitioner dashboard without needing to
- * manually reload — the server layout (pro/layout.tsx) re-checks the real
- * assistant row on every router.refresh() and swaps in the dashboard itself
- * once status is "approved".
+ * approves them they move on without a manual reload: router.refresh() makes
+ * the server layout (pro/layout.tsx) re-check the real assistant row, which
+ * sends a newly approved assistant to complete their profile first (and to
+ * the dashboard once it is complete).
  */
 export function AssistantGate({ initialStatus, initialDoctorName, initialRejectionReason }: AssistantGateProps) {
   const router = useRouter();
@@ -86,8 +86,8 @@ export function AssistantGate({ initialStatus, initialDoctorName, initialRejecti
             <div className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-2 border-herb-green border-t-transparent" />
             <h1 className="font-display text-xl font-bold text-foreground">Waiting for approval</h1>
             <p className="mt-3 text-sm text-muted-foreground">
-              {doctorName ? `${doctorName} needs` : "The doctor needs"} to approve your access before you can use
-              the practitioner dashboard. This page updates automatically once they do.
+              {doctorName ? `${doctorName} needs` : "The doctor needs"} to approve your access. Once they do, this page moves on
+              automatically and you will be asked to complete your profile before using the dashboard.
             </p>
           </>
         )}

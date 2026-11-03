@@ -186,6 +186,25 @@ export class AssistantRepository {
     return this.mapRow(data);
   }
 
+  /**
+   * Whether the assistant has filled the fields their profile requires (date of birth, gender, blood group — the
+   * same set the create-profile form and the header completion indicator use). Fails open: if it cannot be
+   * checked, the assistant is not blocked from the dashboard.
+   */
+  static async isProfileComplete(userId: string): Promise<boolean> {
+    const supabase: any = createClient();
+    const { data, error } = await supabase
+      .from("assistants")
+      .select("date_of_birth, gender, blood_group")
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (error) {
+      console.error("[AssistantRepository] isProfileComplete error:", error.message);
+      return true;
+    }
+    return Boolean(data?.date_of_birth && data?.gender && data?.blood_group);
+  }
+
   static async getLinkedDoctorName(practitionerId: string): Promise<string | null> {
     const supabase: any = createClient();
     const { data } = await supabase
