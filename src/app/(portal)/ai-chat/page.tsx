@@ -1,410 +1,296 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback, useLayoutEffect, type ReactNode } from "react";
 import Link from "next/link";
-import type { ChatMessage } from "@/lib/types";
+import { Sparkles, RotateCcw, Copy, Check, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/contexts/auth-context";
+import { API_ROUTES } from "@/constants/api.constants";
+import { AiMarkdown } from "@/components/chat/AiMarkdown";
 
 const PATIENT_PROMPTS = [
-  "Configure my Dinacharya",
-  "Balance Pitta dosha",
+  "Suggest a simple Dinacharya",
+  "How to balance Pitta in summer?",
   "Tips for better Nidra (sleep)",
-  "Strengthen my Agni",
-  "Panchakarma (Shodhana) benefits",
-  "Ritucharya for this season",
-  "Immunity (Ojas) boosters",
-  "Manage Chittodvega (stress)",
+  "How can I strengthen my Agni?",
+  "What is Panchakarma?",
+  "मन शांत रखने के लिए आयुर्वेदिक उपाय",
 ];
 
 const PRACTITIONER_PROMPTS = [
-  "Symptom-to-Nidana analysis",
-  "Suggest herbs for Pitta Vikriti",
-  "Check herb interaction / opposing Virya",
-  "Formulate SOAP template for Prameha",
-  "Anupana intelligence for Jwara",
-  "Samprapti mapping for Amavata",
-  "List classical herbs for Swasa (breathing)",
-  "Nuskha recommendations for Sluggish Agni",
+  "Explain Amavata: Nidana, Samprapti and Chikitsa sutra",
+  "Complete Dravyaguna profile of Guduchi",
+  "Compare Vataja, Pittaja and Kaphaja Jwara",
+  "Chikitsa sutra and Pathya-Apathya in Prameha",
+  "Shodhana vs Shamana: when to choose which",
+  "Sama vs Nirama Dosha lakshana",
 ];
 
-interface ModelState {
-  loaded: boolean;
-  message: string;
-  progress: number;
-  error: string | null;
+type Turn = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  at: number;
+  error?: boolean;
+  /** Answer is still being written. */
+  streaming?: boolean;
+  /** Answer was cut short (Stop pressed or connection dropped). */
+  partial?: boolean;
+};
+
+const STORAGE_KEY = "yc-ai-chat";
+const MAX_INPUT = 2000;
+
+// Chat history lives only in this browser tab (sessionStorage) per pilot policy.
+function loadHistory(userId: string): Turn[] {
+  try {
+    const raw = sessionStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as { userId: string; turns: Turn[] };
+    if (parsed.userId !== userId) return [];
+    return parsed.turns.map((t) => (t.streaming ? { ...t, streaming: false, partial: true } : t));
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(userId: string, turns: Turn[]) {
+  try {
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ userId, turns: turns.slice(-40) }));
+  } catch {
+    /* storage unavailable — chat still works in memory */
+  }
+}
+
+/** Patients get plain text; strip any markdown symbols the model slips in. */
+function toPlainText(text: string): string {
+  return text
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s*>\s?/gm, "")
+    .replace(/^\s*[-*•]\s+/gm, "• ")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1$2")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 export default function AIChatPage() {
   const { user } = useAuth();
-  const isPractitioner = user?.role === "practitioner";
+  const isPro = user?.role === "practitioner" || user?.role === "assistant";
 
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState("");
-  const [isTyping, setIsTyping] = useState(false);
-  
-  // Model state variables
-  const [modelState, setModelState] = useState<ModelState>({
-    loaded: false,
-    message: "Checking model status...",
-    progress: 0,
-    error: null,
-  });
-  const [isInitializing, setIsInitializing] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [available, setAvailable] = useState<boolean | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const stickToBottom = useRef(true);
+  const abortRef = useRef<AbortController | null>(null);
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const assistantName = isPro ? "Vaidya Sahayak" : "AyurSanvaad";
+  const greeting = isPro
+    ? `Pranam Vaidya-ji 🙏 I'm **${assistantName}**, your classical Ayurveda learning and reference assistant.\n\nAsk me about any concept, disease (Nidana, Samprapti, Chikitsa), dravya or formulation, and I'll give you a clear, structured answer.\n\n> During this pilot I can't see patient records, so please don't share patient details.`
+    : `Namaste 🙏 I'm ${assistantName}, your Ayurveda wellness guide. Ask me about daily routines, diet, sleep or seasons, in English, Hindi or your language.\n\nI give general information only, not medical advice, and I can't see your appointments or records.`;
 
-  // Set initial messages dynamically based on user role when user object is loaded
   useEffect(() => {
-    if (user) {
-      setMessages([
-        {
-          id: "ai-0",
-          role: "ai",
-          content: isPractitioner
-            ? "Pranam Vaidya-ji 🙏 I am Vaidya Sahayak AI, your clinical co-pilot. I can assist you with Symptom-to-Nidana mapping, herb suggestion checks for opposing Virya, and formulating classical Nuskha templates.\n\nWhat clinical case can I assist you with today?"
-            : "Namaste 🙏 I am AyurSanvaad AI, powered by the AyurParam 2.9B LLM. I can help you structure your daily Dinacharya routines, analyze Dosha imbalances, and guide you towards health remedies.\n\nWhat brings you here today? How is your Agni and Nidra?",
-          timestamp: new Date(),
-        },
-      ]);
-    }
-  }, [user, isPractitioner]);
+    if (user?.id) setTurns(loadHistory(user.id));
+  }, [user?.id]);
 
-  // Poll status from the API route
-  const checkStatus = async () => {
-    try {
-      const res = await fetch("/api/ai-chat");
-      if (res.ok) {
-        const data = await res.json();
-        setModelState({
-          loaded: data.loaded,
-          message: data.message,
-          progress: data.progress,
-          error: data.error,
-        });
-
-        // Stop polling if loaded or if there's an error
-        if (data.loaded) {
-          setIsInitializing(false);
-          if (pollIntervalRef.current) {
-            clearInterval(pollIntervalRef.current);
-            pollIntervalRef.current = null;
-          }
-        } else if (data.error) {
-          setIsInitializing(false);
-          if (pollIntervalRef.current) {
-            clearInterval(pollIntervalRef.current);
-            pollIntervalRef.current = null;
-          }
-        }
-      }
-    } catch (e: any) {
-      setModelState((prev) => ({
-        ...prev,
-        error: "Failed to connect to backend server. Make sure the database and API are running.",
-      }));
-      setIsInitializing(false);
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-        pollIntervalRef.current = null;
-      }
-    }
-  };
-
-  // Run status check on mount
   useEffect(() => {
-    checkStatus();
-    
+    if (user?.id && !sending) saveHistory(user.id, turns);
+  }, [user?.id, turns, sending]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(API_ROUTES.AI_CHAT)
+      .then((r) => r.json())
+      .then((j) => !cancelled && setAvailable(!!j?.data?.available))
+      .catch(() => !cancelled && setAvailable(false));
     return () => {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-      }
+      cancelled = true;
+      abortRef.current?.abort();
     };
   }, []);
 
-  // Scroll to bottom when new messages arrive
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isTyping]);
+  // Follow the answer as it streams, unless the user has scrolled up to read.
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
+  }, [turns, sending]);
 
-  // Start polling
-  const startPolling = () => {
-    if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
-    pollIntervalRef.current = setInterval(checkStatus, 800);
+  const onScroll = () => {
+    const el = scrollRef.current;
+    if (el) stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   };
 
-  // Trigger model loading
-  const initializeModel = async () => {
-    setIsInitializing(true);
-    setModelState((prev) => ({
-      ...prev,
-      error: null,
-      message: "Starting background server and initializing thread...",
-      progress: 5,
-    }));
+  const updateTurn = (id: string, patch: (t: Turn) => Partial<Turn>) =>
+    setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch(t) } : t)));
 
-    try {
-      const res = await fetch("/api/ai-chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "load" }),
-      });
+  const send = useCallback(
+    async (text: string) => {
+      const content = text.trim();
+      if (!content || sending) return;
 
-      if (res.ok) {
-        const data = await res.json();
-        setModelState({
-          loaded: data.loaded || false,
-          message: data.message || "Initializing...",
-          progress: data.progress || 5,
-          error: data.error || null,
-        });
-        
-        // Start polling for real-time progress updates
-        startPolling();
-      } else {
-        const err = await res.json();
-        setModelState((prev) => ({
-          ...prev,
-          error: err.error || "Failed to trigger initialization.",
-        }));
-        setIsInitializing(false);
-      }
-    } catch (e: any) {
-      setModelState((prev) => ({
-        ...prev,
-        error: e.message || "Connection refused.",
-      }));
-      setIsInitializing(false);
-    }
-  };
+      const now = Date.now();
+      const userTurn: Turn = { id: `u-${now}`, role: "user", content, at: now };
+      const replyId = `a-${now}`;
+      const history = [...turns.filter((t) => !t.error && t.content), userTurn];
+      setTurns((prev) => [...prev, userTurn, { id: replyId, role: "assistant", content: "", at: now, streaming: true }]);
+      setInput("");
+      setSending(true);
+      stickToBottom.current = true;
 
-  // Send message
-  async function sendMessage(text: string) {
-    if (!text.trim() || isTyping) return;
-    
-    const userMsg: ChatMessage = {
-      id: `u-${Date.now()}`,
-      role: "user",
-      content: text,
-      timestamp: new Date(),
-    };
-    
-    setMessages((prev) => [...prev, userMsg]);
-    setInput("");
-    setIsTyping(true);
+      const controller = new AbortController();
+      abortRef.current = controller;
 
-    try {
-      const res = await fetch("/api/ai-chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "chat", message: text, role: user?.role || "patient" }),
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        const aiMsg: ChatMessage = {
-          id: `ai-${Date.now()}`,
-          role: "ai",
-          content: data.response,
-          timestamp: new Date(),
-        };
-        setMessages((prev) => [...prev, aiMsg]);
-      } else {
-        const errData = await res.json();
-        const errorMsg: ChatMessage = {
-          id: `err-${Date.now()}`,
-          role: "ai",
-          content: `⚠️ Chikitsa Error: ${errData.error || "The model failed to generate a response. Please try again."}`,
-          timestamp: new Date(),
-        };
-        setMessages((prev) => [...prev, errorMsg]);
-      }
-    } catch (e: any) {
-      const errorMsg: ChatMessage = {
-        id: `err-${Date.now()}`,
-        role: "ai",
-        content: `⚠️ Connection Error: Failed to communicate with the model server (${e.message}). Please ensure the local service is running.`,
-        timestamp: new Date(),
+      // Buffer incoming text and paint at most once per animation frame.
+      let pending = "";
+      let frame = 0;
+      const flush = () => {
+        frame = 0;
+        if (!pending) return;
+        const add = pending;
+        pending = "";
+        updateTurn(replyId, (t) => ({ content: t.content + add }));
       };
-      setMessages((prev) => [...prev, errorMsg]);
-    } finally {
-      setIsTyping(false);
-    }
-  }
+      const fail = (message: string) => {
+        if (frame) cancelAnimationFrame(frame);
+        flush();
+        updateTurn(replyId, (t) =>
+          t.content ? { streaming: false, partial: true } : { streaming: false, error: true, content: message },
+        );
+      };
 
-  const quickPrompts = isPractitioner ? PRACTITIONER_PROMPTS : PATIENT_PROMPTS;
+      try {
+        const res = await fetch(API_ROUTES.AI_CHAT, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messages: history.map(({ role, content }) => ({ role, content })) }),
+          signal: controller.signal,
+        });
 
-  // Loading Screen rendering when model is not ready
-  if (!modelState.loaded) {
-    return (
-      <div className="h-[calc(100vh-3.5rem)] flex items-center justify-center bg-ivory p-4">
-        <div className="w-full max-w-lg bg-white rounded-3xl border border-border/80 shadow-xl overflow-hidden p-6 sm:p-8 space-y-6 animate-in fade-in zoom-in-95 duration-300">
-          
-          {/* Logo / Header */}
-          <div className="flex flex-col items-center text-center space-y-3">
-            <div className="w-16 h-16 rounded-2xl bg-ivory-gradient border-2 border-copper/30 flex items-center justify-center shadow-md shadow-copper/5">
-              <span className="text-3xl">✨</span>
-            </div>
-            <div className="space-y-1">
-              <h1 className="font-display text-2xl font-bold text-foreground">
-                {isPractitioner ? "Vaidya Sahayak Loader" : "AyurParam AI Loader"}
-              </h1>
-              <p className="text-xs text-muted-foreground max-w-sm">
-                Initializing <strong>bharatgenai/AyurParam</strong> (2.9B LLM) — Sovereign AI tuned for classical Ayurvedic text interpretation and clinical insights.
-              </p>
-            </div>
-          </div>
+        if (!res.ok || !res.body || !res.headers.get("content-type")?.includes("ndjson")) {
+          const json = await res.json().catch(() => null);
+          fail(json?.message || "Something went wrong. Please try again.");
+          return;
+        }
 
-          {/* Model info banner */}
-          <div className="bg-ivory-deep border border-sand rounded-2xl p-4 text-xs space-y-2 text-foreground/80 leading-relaxed">
-            <div className="flex justify-between border-b border-sand/50 pb-1.5 font-mono text-[10px] text-muted-foreground">
-              <span>MODEL IDENTIFIER</span>
-              <span className="font-bold text-herb-green">bharatgenai/AyurParam</span>
-            </div>
-            {isPractitioner ? (
-              <>
-                <p>
-                  🎓 <strong>Clinician Reference:</strong> Grounded in Ayurvedic treatises (Charaka, Sushruta, Vagbhata) to map pathogenesis (*Samprapti*) and suggest clinical *Aushadhi* formulations.
-                </p>
-                <p>
-                  🔬 <strong>Precision Tools:</strong> Ready for opposing *Virya* checks, *Anupana* optimization, and pre-formatted EMR SOAP notes.
-                </p>
-              </>
-            ) : (
-              <>
-                <p>
-                  🌿 <strong>Ayurvedic Grounding:</strong> Trained on classical treatises for general *Nidana* (wellness) and *Chikitsa* (remedial) routine guidance.
-                </p>
-                <p>
-                  🖥️ <strong>Local Compute:</strong> Runs directly on your device. First load initializes weights and loads layers into active memory.
-                </p>
-              </>
-            )}
-          </div>
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let finished = false;
+        while (!finished) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let nl: number;
+          while ((nl = buffer.indexOf("\n")) >= 0) {
+            const line = buffer.slice(0, nl).trim();
+            buffer = buffer.slice(nl + 1);
+            if (!line) continue;
+            const evt = JSON.parse(line) as { type: string; text?: string; message?: string };
+            if (evt.type === "delta" && evt.text) {
+              pending += evt.text;
+              if (!frame) frame = requestAnimationFrame(flush);
+            } else if (evt.type === "error") {
+              fail(evt.message || "The answer was interrupted. Please try again.");
+              finished = true;
+            } else if (evt.type === "done") {
+              finished = true;
+            }
+          }
+        }
+        if (frame) cancelAnimationFrame(frame);
+        flush();
+        updateTurn(replyId, (t) => (t.error ? {} : { streaming: false, partial: !finished }));
+      } catch (err) {
+        if ((err as Error)?.name === "AbortError") {
+          if (frame) cancelAnimationFrame(frame);
+          flush();
+          updateTurn(replyId, (t) => (t.content ? { streaming: false, partial: true } : { streaming: false, error: true, content: "Stopped." }));
+        } else {
+          fail("Couldn't reach the server. Check your connection and try again.");
+        }
+      } finally {
+        abortRef.current = null;
+        setSending(false);
+      }
+    },
+    [turns, sending],
+  );
 
-          {/* Progress Section */}
-          {(isInitializing || modelState.progress > 0) && (
-            <div className="space-y-2.5 animate-in slide-in-from-bottom-3 duration-250">
-              <div className="flex items-center justify-between text-xs">
-                <span className="font-medium text-herb-green flex items-center gap-2">
-                  <span className="w-1.5 h-1.5 rounded-full bg-herb-green animate-ping" />
-                  {modelState.message}
-                </span>
-                <span className="font-bold text-foreground">{modelState.progress}%</span>
-              </div>
-              
-              {/* Progress track */}
-              <div className="w-full h-2.5 bg-sand rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-herb-green rounded-full transition-all duration-300 ease-out shadow-sm"
-                  style={{ width: `${modelState.progress}%` }}
-                />
-              </div>
-            </div>
-          )}
+  const stop = () => abortRef.current?.abort();
 
-          {/* Error Banner */}
-          {modelState.error && (
-            <div className="bg-destructive/10 border border-destructive/20 rounded-2xl p-3.5 flex items-start gap-2.5 animate-in shake duration-300">
-              <span className="text-destructive text-lg">⚠️</span>
-              <div className="flex-1 space-y-1">
-                <p className="text-xs font-bold text-destructive">Initialization Failed</p>
-                <p className="text-[11px] text-destructive/80 leading-normal">{modelState.error}</p>
-              </div>
-            </div>
-          )}
+  const prompts = isPro ? PRACTITIONER_PROMPTS : PATIENT_PROMPTS;
+  const blocked = available === false;
 
-          {/* Actions */}
-          <div className="flex flex-col space-y-2">
-            {!isInitializing && (
-              <button
-                onClick={initializeModel}
-                className="w-full py-3.5 bg-herb-green text-white hover:bg-herb-green/90 transition-all font-semibold rounded-2xl shadow-md shadow-herb-green/10 active:scale-[0.98]"
-              >
-                {modelState.error ? "Retry Initializing Model" : "Initialize AyurParam Model"}
-              </button>
-            )}
-            {isInitializing && (
-              <button
-                disabled
-                className="w-full py-3.5 bg-sand text-muted-foreground font-semibold rounded-2xl flex items-center justify-center gap-2.5 cursor-not-allowed"
-              >
-                <span className="w-4 h-4 border-2 border-muted-foreground/30 border-t-muted-foreground rounded-full animate-spin" />
-                Loading Model Weights...
-              </button>
-            )}
-            <Link
-              href={isPractitioner ? "/pro" : "/discover"}
-              className="text-xs text-center text-muted-foreground hover:text-herb-green font-medium py-1 hover:underline transition-colors"
-            >
-              {isPractitioner ? "Skip and Open Patient Registry" : "Skip and Find a verified Vaidya instead"}
-            </Link>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // Main chat screen when model loaded successfully
   return (
-    <div className="h-[calc(100vh-3.5rem)] flex flex-col max-w-4xl mx-auto animate-in fade-in duration-300">
-      {/* Chat header */}
+    <div className="h-[calc(100dvh-3.5rem)] flex flex-col max-w-4xl mx-auto">
+      {/* Header */}
       <div className="px-4 sm:px-6 py-4 border-b border-border bg-background flex-shrink-0">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-ivory-gradient border border-copper/30 flex items-center justify-center">
-            <span className="text-lg">✨</span>
+            <Sparkles size={18} className="text-copper" />
           </div>
-          <div className="flex-1">
+          <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
-              <h1 className="font-semibold text-foreground">
-                {isPractitioner ? "Vaidya Sahayak AI" : "AyurSanvaad AI"}
-              </h1>
-              <span className="text-[10px] bg-herb-green/10 text-herb-green font-semibold px-2.5 py-0.5 rounded-full flex items-center gap-1">
-                <span className="w-1 h-1 rounded-full bg-herb-green animate-pulse" />
-                AyurParam 2.9B
-              </span>
-              {isPractitioner && (
-                <span className="text-[10px] bg-copper/10 text-copper font-semibold px-2 py-0.5 rounded-full">
-                  Clinical Co-Pilot
-                </span>
-              )}
+              <h1 className="font-semibold text-foreground">{assistantName}</h1>
+              <span className="text-[10px] bg-herb-green/10 text-herb-green font-semibold px-2.5 py-0.5 rounded-full">Pilot</span>
+              {isPro && <span className="text-[10px] bg-copper/10 text-copper font-semibold px-2 py-0.5 rounded-full">For Vaidyas</span>}
             </div>
-            <p className="text-xs text-muted-foreground">
-              {isPractitioner
-                ? "Clinical Reference & EMR Assistant · For Qualified Vaidyas"
-                : "Swasthya Vrittanta & Chikitsa Guidance · Non-diagnostic"}
+            <p className="text-xs text-muted-foreground truncate">
+              {isPro ? "Structured classical reference for learning · Not for patient-specific decisions" : "General Ayurveda wellness guidance · Non-diagnostic"}
             </p>
           </div>
-          <div className="flex items-center gap-1.5 bg-emerald-50 px-2 py-1 rounded-lg border border-emerald-200/50">
-            <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
-            <span className="text-[10px] font-bold text-emerald-700 uppercase tracking-wider">Active</span>
-          </div>
+          {turns.length > 0 && !sending && (
+            <button
+              onClick={() => setTurns([])}
+              title="Clear chat"
+              className="p-2 rounded-xl text-muted-foreground hover:text-foreground hover:bg-neutral-100 transition-colors"
+            >
+              <RotateCcw size={16} />
+            </button>
+          )}
         </div>
 
         <div className="mt-3 flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
           <span className="text-amber-500 text-sm mt-0.5">⚠️</span>
           <p className="text-[10px] text-amber-700 leading-relaxed font-medium">
-            {isPractitioner
-              ? "Vaidya Sahayak AI is a clinical co-pilot designed to reference treatises. Final clinical judgment remains solely with the practicing Vaidya."
-              : "AyurSanvaad AI provides general wellness guidance only. It is not a substitute for clinical Nidana. Consult a verified Vaidya for medical advice."}
+            {isPro
+              ? "AI-generated reference only. Verify against classical texts; final clinical judgment rests with the treating Vaidya. Do not enter patient names, phone numbers or records."
+              : "AI-generated general information, not medical advice. Don't share personal details. For emergencies call 112. Consult a verified Vaidya for treatment."}
           </p>
         </div>
       </div>
 
-      {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-4 space-y-4">
-        {messages.length === 1 && (
+      {/* Messages */}
+      <div
+        ref={scrollRef}
+        onScroll={onScroll}
+        className={cn("flex-1 overflow-y-auto px-4 sm:px-6 py-5", isPro ? "space-y-6 bg-ivory/40" : "space-y-4")}
+      >
+        {isPro ? <ProAnswer content={greeting} /> : <PatientBubble role="assistant" content={greeting} />}
+
+        {blocked && (
+          <div className="bg-red-50 border border-red-200 text-red-800 text-xs rounded-xl px-3 py-2.5">
+            The AI Assistant isn&apos;t available right now. Please check back later.
+          </div>
+        )}
+
+        {turns.length === 0 && !blocked && (
           <div>
             <p className="text-xs text-muted-foreground font-semibold mb-3 tracking-wide uppercase">
-              {isPractitioner ? "Case assistance workflows" : "Quick wellness topics"}
+              {isPro ? "Try asking" : "Quick wellness topics"}
             </p>
-            <div className="flex flex-wrap gap-2">
-              {quickPrompts.map((p) => (
+            <div className={cn(isPro ? "grid grid-cols-1 sm:grid-cols-2 gap-2" : "flex flex-wrap gap-2")}>
+              {prompts.map((p) => (
                 <button
                   key={p}
-                  onClick={() => sendMessage(p)}
-                  className="text-xs border border-border rounded-full px-3.5 py-1.5 text-foreground bg-white hover:border-herb-green/40 hover:bg-herb-green/5 hover:text-herb-green transition-all shadow-sm active:scale-95 cursor-pointer"
+                  onClick={() => send(p)}
+                  disabled={sending || blocked}
+                  className={cn(
+                    "text-xs border border-border text-foreground bg-white hover:border-herb-green/40 hover:bg-herb-green/5 hover:text-herb-green transition-all shadow-sm active:scale-[0.98] disabled:opacity-50",
+                    isPro ? "rounded-xl px-3.5 py-2.5 text-left" : "rounded-full px-3.5 py-1.5",
+                  )}
                 >
                   {p}
                 </button>
@@ -413,134 +299,219 @@ export default function AIChatPage() {
           </div>
         )}
 
-        {messages.map((msg) => (
-          <div key={msg.id} className={cn("flex", msg.role === "user" ? "justify-end" : "justify-start")}>
-            {msg.role === "ai" && (
-              <div className="w-7 h-7 rounded-lg bg-ivory-gradient border border-copper/20 flex items-center justify-center flex-shrink-0 mr-2 mt-auto">
-                <span className="text-sm">✨</span>
-              </div>
-            )}
-            <div className={cn("max-w-[80%] text-sm leading-relaxed p-3.5 rounded-2xl shadow-sm border", 
-              msg.role === "user" 
-                ? "bg-herb-green text-white border-herb-green/20 rounded-br-none" 
-                : msg.content.startsWith("⚠️") 
-                  ? "bg-red-50 text-red-800 border-red-200 rounded-bl-none font-medium" 
-                  : "bg-white text-foreground border-border/70 rounded-bl-none"
-            )}>
-              {msg.content.split("\n").map((line, i, arr) => (
-                <span key={i} className="block min-h-[0.5rem]">
-                  {/* Basic markdown rendering for bold headers and bullet points */}
-                  {line.startsWith("###") ? (
-                    <span className="block font-display text-base font-bold text-foreground/90 mt-2 mb-1">
-                      {line.replace("###", "").trim()}
-                    </span>
-                  ) : line.startsWith("####") ? (
-                    <span className="block text-sm font-bold text-foreground/90 mt-2 mb-0.5">
-                      {line.replace("####", "").trim()}
-                    </span>
-                  ) : line.startsWith("* **") || line.startsWith("   * **") || line.startsWith("• **") ? (
-                    <span className="pl-2">
-                      • <strong>{line.replace(/^(\s*\*\s*\*\*|\s*•\s*\*\*)/, "").split("**")[0]}</strong>
-                      {line.split("**").slice(2).join("**")}
-                    </span>
-                  ) : line.startsWith("1. **") || line.startsWith("2. **") || line.startsWith("3. **") || line.startsWith("4. **") || line.startsWith("5. **") ? (
-                    <span className="pl-1">
-                      {line.split("**")[0]}<strong>{line.split("**")[1]}</strong>
-                      {line.split("**").slice(2).join("**")}
-                    </span>
-                  ) : line.startsWith("*") || line.startsWith("•") ? (
-                    <span className="pl-3 block">
-                      • {line.substring(1).trim()}
-                    </span>
-                  ) : line.startsWith("```") ? (
-                    null // Hide markdown block identifiers
-                  ) : (
-                    <span>
-                      {/* Sub-bold highlights inside plain sentences */}
-                      {line.includes("**") ? (
-                        <span>
-                          {line.split("**").map((chunk, idx) => 
-                            idx % 2 === 1 ? <strong key={idx}>{chunk}</strong> : chunk
-                          )}
-                        </span>
-                      ) : (
-                        line
-                      )}
-                    </span>
-                  )}
-                </span>
-              ))}
-              <p className={cn("text-[9px] mt-2 text-right tracking-wide", msg.role === "user" ? "text-white/60" : "text-muted-foreground/60")}>
-                {new Date(msg.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}
-              </p>
-            </div>
-          </div>
-        ))}
-
-        {isTyping && (
-          <div className="flex items-end gap-2">
-            <div className="w-7 h-7 rounded-lg bg-ivory-gradient border border-copper/20 flex items-center justify-center flex-shrink-0">
-              <span className="text-sm">✨</span>
-            </div>
-            <div className="bg-white border border-border/70 p-4 rounded-2xl rounded-bl-none shadow-sm flex items-center gap-1.5">
-              {[0, 1, 2].map((i) => (
-                <div
-                  key={i}
-                  className="w-2.5 h-2.5 rounded-full bg-sage animate-bounce"
-                  style={{ animationDelay: `${i * 0.15}s` }}
-                />
-              ))}
-            </div>
-          </div>
+        {turns.map((t) =>
+          t.role === "assistant" && t.streaming && !t.content ? (
+            <Thinking key={t.id} detailed={isPro} />
+          ) : isPro ? (
+            t.role === "user" ? (
+              <ProQuestion key={t.id} content={t.content} />
+            ) : (
+              <ProAnswer key={t.id} content={t.content} error={t.error} streaming={t.streaming} partial={t.partial} showActions={!t.error && !t.streaming} />
+            )
+          ) : (
+            <PatientBubble key={t.id} role={t.role} content={t.content} error={t.error} at={t.at} streaming={t.streaming} />
+          ),
         )}
-        <div ref={messagesEndRef} />
       </div>
 
-      {/* Input controls */}
-      <div className="border-t border-border bg-background px-4 sm:px-6 py-4 flex-shrink-0">
+      {/* Input */}
+      <div className="border-t border-border bg-background px-4 sm:px-6 py-3 flex-shrink-0">
         <div className="flex items-end gap-2.5">
           <div className="flex-1 bg-white border border-border rounded-2xl overflow-hidden focus-within:border-herb-green/50 focus-within:ring-2 focus-within:ring-herb-green/10 transition-all">
             <textarea
               rows={1}
-              placeholder={isPractitioner ? "Enter case presentation, symptoms, check herb compatibility..." : "Ask about wellness, remedies, Nidra, Dinacharya..."}
+              maxLength={MAX_INPUT}
+              placeholder={isPro ? "Ask about a disease, concept, dravya or formulation…" : "Ask about diet, sleep, routines, Doshas…"}
               value={input}
+              disabled={blocked}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                   e.preventDefault();
-                  sendMessage(input);
+                  send(input);
                 }
               }}
-              className="w-full px-4 py-3.5 text-sm resize-none focus:outline-none placeholder:text-muted-foreground bg-transparent"
+              className="w-full px-4 py-3.5 text-sm resize-none focus:outline-none placeholder:text-muted-foreground bg-transparent max-h-40"
             />
           </div>
-          <button
-            onClick={() => sendMessage(input)}
-            disabled={!input.trim() || isTyping}
-            className={cn(
-              "w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0 transition-all cursor-pointer",
-              input.trim() && !isTyping
-                ? "bg-herb-green text-white hover:bg-herb-green/90 shadow-md shadow-herb-green/15 active:scale-95"
-                : "bg-muted text-muted-foreground cursor-not-allowed"
-            )}
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>
-              <line x1="22" y1="2" x2="11" y2="13" />
-              <polygon points="22 2 15 22 11 13 2 9 22 2" />
-            </svg>
-          </button>
-        </div>
-        <div className="flex items-center justify-center mt-3">
-          {isPractitioner ? (
-            <Link href="/pro" className="text-xs text-herb-green font-semibold flex items-center gap-1 hover:underline">
-              <span>📋</span> Go back to Patient Registry
-            </Link>
+          {sending ? (
+            <button
+              onClick={stop}
+              aria-label="Stop answering"
+              title="Stop"
+              className="w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0 bg-foreground text-background hover:opacity-90 active:scale-95 transition-all"
+            >
+              <Square size={14} fill="currentColor" />
+            </button>
           ) : (
-            <Link href="/discover" className="text-xs text-herb-green font-semibold flex items-center gap-1 hover:underline">
-              <span>🩺</span> Find a verified Vaidya instead
-            </Link>
+            <button
+              onClick={() => send(input)}
+              disabled={!input.trim() || blocked}
+              aria-label="Send"
+              className={cn(
+                "w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0 transition-all",
+                input.trim() && !blocked
+                  ? "bg-herb-green text-white hover:bg-herb-green/90 shadow-md shadow-herb-green/15 active:scale-95"
+                  : "bg-muted text-muted-foreground cursor-not-allowed",
+              )}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>
+                <line x1="22" y1="2" x2="11" y2="13" />
+                <polygon points="22 2 15 22 11 13 2 9 22 2" />
+              </svg>
+            </button>
           )}
         </div>
+        <div className="flex items-center justify-between mt-2 text-[10px] text-muted-foreground">
+          <span>Chat is kept in this tab only.</span>
+          {isPro ? (
+            <Link href="/pro" className="text-herb-green font-semibold hover:underline">Back to Dashboard</Link>
+          ) : (
+            <Link href="/discover" className="text-herb-green font-semibold hover:underline">Find a verified Vaidya</Link>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Avatar() {
+  return (
+    <div className="w-8 h-8 rounded-xl bg-ivory-gradient border border-copper/25 flex items-center justify-center flex-shrink-0 shadow-sm">
+      <Sparkles size={14} className="text-copper" />
+    </div>
+  );
+}
+
+function Thinking({ detailed }: { detailed: boolean }) {
+  return (
+    <div className="flex items-center gap-3">
+      <Avatar />
+      <div className="flex items-center gap-1.5 bg-white border border-border/70 px-3.5 py-2.5 rounded-2xl shadow-sm">
+        {[0, 1, 2].map((i) => (
+          <div key={i} className="w-2 h-2 rounded-full bg-sage animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />
+        ))}
+        <span className="ml-1.5 text-xs text-muted-foreground">{detailed ? "Preparing your answer…" : "Thinking…"}</span>
+      </div>
+    </div>
+  );
+}
+
+function Cursor() {
+  return <span aria-hidden className="inline-block w-[7px] h-[15px] ml-0.5 -mb-0.5 rounded-[2px] bg-herb-green/70 animate-pulse" />;
+}
+
+/* ---------------- Practitioner: structured answer cards ---------------- */
+
+function ProQuestion({ content }: { content: string }) {
+  return (
+    <div className="flex justify-end">
+      <div className="max-w-[85%] bg-herb-green text-white text-[14.5px] leading-relaxed px-4 py-2.5 rounded-2xl rounded-br-md shadow-sm whitespace-pre-wrap break-words">
+        {content}
+      </div>
+    </div>
+  );
+}
+
+function ProAnswer({
+  content,
+  error,
+  streaming,
+  partial,
+  showActions,
+}: {
+  content: string;
+  error?: boolean;
+  streaming?: boolean;
+  partial?: boolean;
+  showActions?: boolean;
+}) {
+  if (error) {
+    return (
+      <div className="flex gap-3">
+        <Avatar />
+        <div className="text-sm bg-red-50 text-red-800 border border-red-200 rounded-xl px-3.5 py-2.5">{content}</div>
+      </div>
+    );
+  }
+  return (
+    <div className="flex gap-3">
+      <div className="pt-1 hidden sm:block">
+        <Avatar />
+      </div>
+      <div className="flex-1 min-w-0 bg-white border border-border/70 rounded-2xl shadow-sm px-4 py-4 sm:px-6 sm:py-5">
+        <AiMarkdown content={content} />
+        {streaming && <Cursor />}
+        {(showActions || partial) && (
+          <div className="mt-4 pt-3 border-t border-border/60 flex items-center justify-between gap-3">
+            {showActions ? <CopyButton text={content} /> : <span />}
+            <span className="text-[10.5px] text-muted-foreground">
+              {partial ? "Answer stopped early" : "AI-generated · verify with classical texts"}
+            </span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        } catch {
+          /* clipboard blocked */
+        }
+      }}
+      className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground px-2 py-1 -ml-2 rounded-lg hover:bg-neutral-100 transition-colors"
+    >
+      {copied ? <Check size={13} /> : <Copy size={13} />}
+      {copied ? "Copied" : "Copy"}
+    </button>
+  );
+}
+
+/* ---------------- Patient: simple plain-text bubbles ---------------- */
+
+function PatientBubble({
+  role,
+  content,
+  error,
+  at,
+  streaming,
+}: {
+  role: "user" | "assistant";
+  content: string;
+  error?: boolean;
+  at?: number;
+  streaming?: boolean;
+}): ReactNode {
+  const mine = role === "user";
+  return (
+    <div className={cn("flex items-end gap-2", mine ? "justify-end" : "justify-start")}>
+      {!mine && <Avatar />}
+      <div
+        className={cn(
+          "max-w-[85%] sm:max-w-[80%] text-sm leading-relaxed p-3.5 rounded-2xl shadow-sm border break-words whitespace-pre-wrap",
+          mine
+            ? "bg-herb-green text-white border-herb-green/20 rounded-br-none"
+            : error
+              ? "bg-red-50 text-red-800 border-red-200 rounded-bl-none"
+              : "bg-white text-foreground border-border/70 rounded-bl-none",
+        )}
+      >
+        {mine ? content : toPlainText(content)}
+        {streaming && <Cursor />}
+        {at && !streaming && (
+          <p className={cn("text-[9px] mt-1.5 text-right", mine ? "text-white/60" : "text-muted-foreground/60")}>
+            {new Date(at).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}
+          </p>
+        )}
       </div>
     </div>
   );

@@ -50,6 +50,7 @@ const PATIENT_NAV: NavItem[] = [
   { href: "/messages", icon: MessageSquare, label: "Messages" },
   // { href: "/dinacharya", icon: Sun, label: "Dinacharya" },
   { href: "/records", icon: Folder, label: "Health Records" },
+  { href: "/ai-chat", icon: Sparkles, label: "AI Assistant", badge: "Beta" },
   // { href: "/apothecary", icon: Activity, label: "Apothecary" },
   { href: "/profile", icon: User, label: "Profile" },
   "separator",
@@ -87,6 +88,12 @@ const PRACTITIONER_NAV: NavItem[] = [
     href: "/pro/learning",
     icon: GraduationCap,
     label: `${SITE_NAME} Learning`,
+  },
+  {
+    href: "/ai-chat",
+    icon: Sparkles,
+    label: "AI Assistant",
+    badge: "Beta",
   },
   "separator",
   {
