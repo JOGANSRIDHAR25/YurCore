@@ -7,5 +7,5 @@ import { NextRequest } from "next/server";
 import { getStatus, handleAction } from "@/backend/controller/ai-chat.controller";
 import { withErrorHandler } from "@/backend/middleware/error.middleware";
 
-export const GET = withErrorHandler(() => getStatus());
+export const GET = withErrorHandler((req: NextRequest) => getStatus(req));
 export const POST = withErrorHandler((req: NextRequest) => handleAction(req));
