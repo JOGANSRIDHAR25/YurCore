@@ -31,6 +31,7 @@ import {
   formatDayLabel,
 } from "@/components/availability/AvailabilityDialogs";
 import {
+  addDays,
   DEFAULT_WEEKLY_SCHEDULE,
   WEEKDAY_LABELS,
   WEEKDAY_SHORT,
@@ -48,7 +49,6 @@ import {
 import { ENABLE_VIDEO_CONSULTATION } from "@/lib/feature-flags";
 
 type Tab = "weekly" | "dates" | "settings";
-type Scope = "dates" | "forward";
 
 const CAL_HEADERS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -203,6 +203,19 @@ export default function AvailabilityPage() {
 
   const needsSetup = Boolean(state && !state.configured);
 
+  /* ------------------------- "This week" overview data ---------------------- */
+  const [weekOffset, setWeekOffset] = useState(0);
+  const weekStart = useMemo(() => {
+    const d = new Date();
+    const js = d.getDay();
+    d.setDate(d.getDate() + (js === 0 ? -6 : 1 - js) + weekOffset * 7);
+    return toIsoDate(d);
+  }, [weekOffset]);
+  const weekDates = useMemo(() => Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)), [weekStart]);
+  const weekEnd = weekDates[6];
+  const { data: weekOverridesDb, refetch: refetchWeekOverrides } = useCalendarAvailability(user?.id, weekStart, weekEnd);
+  const { data: weekAppointments, refetch: refetchWeekAppointments } = useDoctorAppointments(enabled, weekStart, weekEnd);
+
   /* ------------------------------- local edits ----------------------------- */
   const [weekly, setWeekly] = useState<WeeklyDay[]>(cloneDefault);
   const [weeklyDirty, setWeeklyDirty] = useState(false);
@@ -240,15 +253,36 @@ export default function AvailabilityPage() {
     return map;
   }, [overridesDb]);
 
+  const weekServerOverrides = useMemo(() => {
+    const map: Record<string, DateOverride> = {};
+    (weekOverridesDb ?? []).forEach((row) => (map[row.date] = normaliseOverride(row)));
+    return map;
+  }, [weekOverridesDb]);
+
+  // A specific-date change or leave always wins over the weekly schedule.
   const effectiveOverride = useCallback(
     (date: string): DateOverride | undefined => {
       if (date in dateEdits) return dateEdits[date] ?? undefined;
-      return serverOverrides[date];
+      return serverOverrides[date] ?? weekServerOverrides[date];
     },
-    [dateEdits, serverOverrides],
+    [dateEdits, serverOverrides, weekServerOverrides],
   );
 
   const planFor = useCallback((date: string) => resolveDayPlan(date, effectiveOverride(date), weekly), [effectiveOverride, weekly]);
+
+  const weekAppointmentsByDate = useMemo(() => {
+    const map: Record<string, number> = {};
+    (weekAppointments ?? []).forEach((a) => (map[a.date] = (map[a.date] ?? 0) + 1));
+    return map;
+  }, [weekAppointments]);
+
+  const openDate = (date: string) => {
+    const [y, m] = date.split("-").map(Number);
+    setCurrentYear(y);
+    setCurrentMonth(m - 1);
+    setSelectedDate(date);
+    setTab("dates");
+  };
 
   const appointmentsByDate = useMemo(() => {
     const map: Record<string, NonNullable<typeof monthAppointments>> = {};
@@ -284,20 +318,6 @@ export default function AvailabilityPage() {
     setWeeklyDirty(true);
     setApplyAllPrompt(null);
     toast.success(`${kind === "break" ? "Break" : "OP timing"} ${formatTime12(range.start)} – ${formatTime12(range.end)} added to every working day`);
-  };
-
-  const copyDayToAll = (day: number) => {
-    const source = weekly.find((d) => d.dayOfWeek === day);
-    if (!source) return;
-    setWeekly((prev) =>
-      prev.map((d) =>
-        d.isActive && d.dayOfWeek !== day
-          ? { ...d, startTime: source.startTime, endTime: source.endTime, breaks: source.breaks.map((b) => ({ ...b })), opTimings: source.opTimings.map((b) => ({ ...b })) }
-          : d,
-      ),
-    );
-    setWeeklyDirty(true);
-    toast.success(`${WEEKDAY_LABELS[day]}'s hours copied to all working days`);
   };
 
   /* ---------------------------------- dates -------------------------------- */
@@ -374,14 +394,11 @@ export default function AvailabilityPage() {
   };
 
   /* ---------------------------------- save --------------------------------- */
-  const [scopeOpen, setScopeOpen] = useState(false);
-  const [scope, setScope] = useState<Scope>("dates");
   const [conflicts, setConflicts] = useState<ConflictingAppointment[]>([]);
   const [pendingChange, setPendingChange] = useState<AvailabilityChange | null>(null);
   const [saving, setSaving] = useState(false);
 
   const workingDateEdits = Object.values(dateEdits).filter((d): d is DateOverride => Boolean(d && !d.is_leave && !d.is_holiday));
-  const scopeWeekdays = Array.from(new Set(workingDateEdits.map((d) => dbWeekday(d.date)))).sort();
 
   const validateEdits = (): string | null => {
     for (const d of weekly) {
@@ -399,24 +416,17 @@ export default function AvailabilityPage() {
     return null;
   };
 
-  const buildChange = (chosenScope: Scope): AvailabilityChange => {
+  /**
+   * Specific dates only ever change those dates. To change a weekday for
+   * every week, the doctor edits Weekly hours.
+   */
+  const buildChange = (): AvailabilityChange => {
     const change: AvailabilityChange = { dates: [], clearDates: [], weekly: [] };
     const weeklyOut = new Map<number, WeeklyDay>();
     if (weeklyDirty || needsSetup) weekly.forEach((d) => weeklyOut.set(d.dayOfWeek, d));
 
     Object.entries(dateEdits).forEach(([date, ov]) => {
       if (ov === null) {
-        change.clearDates!.push(date);
-      } else if (chosenScope === "forward" && !ov.is_leave && !ov.is_holiday) {
-        const day = dbWeekday(date);
-        weeklyOut.set(day, {
-          dayOfWeek: day,
-          startTime: ov.working_start ?? "09:00",
-          endTime: ov.working_end ?? "17:00",
-          breaks: ov.breaks,
-          opTimings: ov.op_timings ?? [],
-          isActive: true,
-        });
         change.clearDates!.push(date);
       } else {
         change.dates!.push(ov);
@@ -436,6 +446,8 @@ export default function AvailabilityPage() {
     refetchWeekly();
     refetchOverrides();
     refetchAppointments();
+    refetchWeekOverrides();
+    refetchWeekAppointments();
     refetchPractitioner();
   };
 
@@ -479,9 +491,8 @@ export default function AvailabilityPage() {
     }
   };
 
-  const proceedWithScope = async (chosenScope: Scope) => {
-    setScopeOpen(false);
-    const change = buildChange(chosenScope);
+  const checkAndSave = async () => {
+    const change = buildChange();
     setSaving(true);
     try {
       const found = await previewAvailabilityChange(change);
@@ -504,12 +515,7 @@ export default function AvailabilityPage() {
       toast.error(err);
       return;
     }
-    if (workingDateEdits.length > 0) {
-      setScope("dates");
-      setScopeOpen(true);
-      return;
-    }
-    void proceedWithScope("dates");
+    void checkAndSave();
   };
 
   /* -------------------------------- calendar ------------------------------- */
@@ -577,6 +583,102 @@ export default function AvailabilityPage() {
         </div>
       </div>
 
+      {/* This week at a glance — what patients actually see each day */}
+      <div className="mb-6 rounded-3xl border border-neutral-150 bg-white p-5 shadow-sm">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="font-display text-sm font-bold">{weekOffset === 0 ? "This week" : "Week"} at a glance</h2>
+            <p className="text-[11px] text-muted-foreground">
+              {formatDayLabel(weekStart)} – {formatDayLabel(weekEnd)} · date changes and leave take priority over weekly hours
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setWeekOffset((w) => w - 1)}
+              disabled={weekOffset <= 0}
+              className="rounded-full border border-neutral-200 p-1 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-40"
+              aria-label="Previous week"
+            >
+              <ChevronLeft size={16} />
+            </button>
+            {weekOffset !== 0 && (
+              <button type="button" onClick={() => setWeekOffset(0)} className="rounded-full border border-neutral-200 px-3 py-1 text-[10px] font-bold hover:bg-neutral-50">
+                This week
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setWeekOffset((w) => w + 1)}
+              className="rounded-full border border-neutral-200 p-1 hover:bg-neutral-50"
+              aria-label="Next week"
+            >
+              <ChevronRight size={16} />
+            </button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-7">
+          {weekDates.map((date) => {
+            const plan = planFor(date);
+            const isToday = date === todayKey;
+            const isPast = date < todayKey;
+            const count = weekAppointmentsByDate[date] ?? 0;
+            const unsaved = date in dateEdits;
+            const tag = !plan.available
+              ? plan.reason === "leave"
+                ? { label: "Leave", cls: "bg-red-100 text-red-700" }
+                : { label: "Day off", cls: "bg-neutral-100 text-neutral-500" }
+              : plan.source === "date"
+              ? { label: "Changed for this date", cls: "bg-blue-100 text-[#254EDb]" }
+              : { label: "Weekly hours", cls: "bg-emerald-50 text-emerald-700" };
+            return (
+              <button
+                key={date}
+                type="button"
+                onClick={() => !isPast && openDate(date)}
+                disabled={isPast}
+                className={cn(
+                  "relative flex flex-col items-start gap-1.5 rounded-2xl border p-3 text-left transition-all",
+                  !plan.available && plan.reason === "leave" ? "border-red-200 bg-red-50/40" : plan.source === "date" ? "border-[#254EDb]/30 bg-blue-50/30" : "border-neutral-150",
+                  isToday && "ring-2 ring-[#254EDb]/40",
+                  isPast ? "cursor-default opacity-50" : "hover:border-[#254EDb]/50 hover:shadow-sm",
+                )}
+              >
+                {unsaved && <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-amber-500" title="Unsaved change" />}
+                <span className="text-[11px] font-bold text-neutral-800">
+                  {WEEKDAY_SHORT[dbWeekday(date)]} {Number(date.slice(8))}
+                  {isToday && <span className="ml-1 text-[#254EDb]">· Today</span>}
+                </span>
+                <span className={cn("rounded-full px-2 py-0.5 text-[9px] font-bold", tag.cls)}>{tag.label}</span>
+                {plan.available ? (
+                  <>
+                    <span className="text-xs font-semibold text-neutral-900">
+                      {formatTime12(plan.start)} – {formatTime12(plan.end)}
+                    </span>
+                    {plan.breaks.map((b, i) => (
+                      <span key={`b${i}`} className="flex items-center gap-1 text-[10px] text-orange-600">
+                        <Coffee size={9} /> {formatTime12(b.start)} – {formatTime12(b.end)}
+                      </span>
+                    ))}
+                    {plan.opTimings.map((o, i) => (
+                      <span key={`o${i}`} className="flex items-center gap-1 text-[10px] text-blue-600">
+                        <Building size={9} /> OP {formatTime12(o.start)} – {formatTime12(o.end)}
+                      </span>
+                    ))}
+                  </>
+                ) : (
+                  <span className="text-xs text-neutral-400">Not available</span>
+                )}
+                <span className={cn("mt-auto pt-1 text-[10px] font-bold", count > 0 ? "text-emerald-700" : "text-neutral-400")}>
+                  {count > 0 ? `${count} appointment${count === 1 ? "" : "s"}` : "No appointments"}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       {/* Tabs */}
       <div className="mb-6 inline-flex rounded-full border border-neutral-200 bg-white p-1 text-xs font-bold">
         {(
@@ -616,20 +718,11 @@ export default function AvailabilityPage() {
                     <span className={cn("text-sm font-bold", day.isActive ? "text-foreground" : "text-neutral-400")}>{WEEKDAY_LABELS[day.dayOfWeek]}</span>
                   </div>
                   {day.isActive ? (
-                    <>
-                      <div className="flex min-w-[220px] flex-1 items-center gap-2">
-                        <TimeInput value={day.startTime} onChange={(v) => updateDay(day.dayOfWeek, (d) => ({ ...d, startTime: v }))} />
-                        <span className="text-neutral-300">→</span>
-                        <TimeInput value={day.endTime} onChange={(v) => updateDay(day.dayOfWeek, (d) => ({ ...d, endTime: v }))} />
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => copyDayToAll(day.dayOfWeek)}
-                        className="flex items-center gap-1 rounded-full border border-neutral-200 px-3 py-1.5 text-[10px] font-bold text-neutral-600 hover:bg-neutral-50"
-                      >
-                        <Copy size={11} /> Copy to all days
-                      </button>
-                    </>
+                    <div className="flex min-w-[220px] flex-1 items-center gap-2">
+                      <TimeInput value={day.startTime} onChange={(v) => updateDay(day.dayOfWeek, (d) => ({ ...d, startTime: v }))} />
+                      <span className="text-neutral-300">→</span>
+                      <TimeInput value={day.endTime} onChange={(v) => updateDay(day.dayOfWeek, (d) => ({ ...d, endTime: v }))} />
+                    </div>
                   ) : (
                     <span className="text-xs text-neutral-400">Day off — no bookings</span>
                   )}
@@ -654,7 +747,6 @@ export default function AvailabilityPage() {
                               updateDay(day.dayOfWeek, (d) => ({ ...d, [key]: d[key].filter((_, j) => j !== i) }));
                               setApplyAllPrompt(null);
                             }}
-                            onApplyAll={(r) => applyRangeToAllDays(kind, r)}
                           />
                           {applyAllPrompt && applyAllPrompt.kind === kind && applyAllPrompt.day === day.dayOfWeek && day[key][applyAllPrompt.index] && (
                             <div className="mt-2 flex flex-wrap items-center gap-2 rounded-2xl border border-[#254EDb]/20 bg-blue-50 px-3 py-2 text-[11px] text-blue-900">
@@ -682,7 +774,7 @@ export default function AvailabilityPage() {
             ))
           )}
           <p className="px-2 text-[11px] text-muted-foreground">
-            Tip: set the exact time on a new break first, then press &quot;All days&quot; (or the copy icon) to reuse it everywhere.
+            Weekly hours repeat every week. To change just one date or take leave, use <strong>Specific dates &amp; leave</strong> — those always win over these weekly hours.
           </p>
         </div>
       )}
@@ -1024,53 +1116,6 @@ export default function AvailabilityPage() {
       )}
 
       {/* ──────────────────────────────── Dialogs ────────────────────────────── */}
-
-      {/* After changing hours on specific dates: only those dates, or continue? */}
-      <Modal open={scopeOpen} onClose={() => setScopeOpen(false)} wide>
-        <h3 className="pr-6 text-lg font-bold text-gray-900">How long should the new hours apply?</h3>
-        <p className="mt-1 text-sm text-gray-600">
-          You changed hours on {workingDateEdits.length} date{workingDateEdits.length === 1 ? "" : "s"}:{" "}
-          <span className="font-semibold">{workingDateEdits.slice(0, 4).map((d) => formatDayLabel(d.date)).join(", ")}{workingDateEdits.length > 4 ? "…" : ""}</span>
-        </p>
-        <div className="mt-4 space-y-2">
-          {(
-            [
-              {
-                value: "dates",
-                label: "Only on these dates",
-                hint: "After that, go back to my regular weekly hours.",
-              },
-              {
-                value: "forward",
-                label: `Continue with these hours every ${scopeWeekdays.map((d) => WEEKDAY_LABELS[d]).join(", ")}`,
-                hint: "Updates your weekly hours from now on. Dates with their own custom hours or leave are not affected.",
-              },
-            ] as const
-          ).map((option) => (
-            <label
-              key={option.value}
-              className={cn(
-                "flex cursor-pointer items-start gap-3 rounded-xl border px-4 py-3 transition-colors",
-                scope === option.value ? "border-indigo-300 bg-indigo-50" : "border-gray-200 hover:bg-gray-50",
-              )}
-            >
-              <input type="radio" name="scope" className="mt-1 accent-indigo-600" checked={scope === option.value} onChange={() => setScope(option.value)} />
-              <span>
-                <span className="block text-sm font-semibold text-gray-900">{option.label}</span>
-                <span className="block text-xs text-gray-500">{option.hint}</span>
-              </span>
-            </label>
-          ))}
-        </div>
-        <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-          <button type="button" onClick={() => setScopeOpen(false)} className="rounded-xl border border-gray-200 px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50">
-            Back
-          </button>
-          <button type="button" onClick={() => proceedWithScope(scope)} className="rounded-xl bg-[#254EDb] px-4 py-2.5 text-sm font-bold text-white hover:bg-blue-700">
-            Continue
-          </button>
-        </div>
-      </Modal>
 
       {/* Conflicting appointments: confirm before cancelling */}
       <ConfirmCancellationDialog
