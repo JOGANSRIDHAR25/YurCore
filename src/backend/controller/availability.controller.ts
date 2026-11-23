@@ -403,3 +403,117 @@ export async function updateCalendarAvailabilityController(
     );
   }
 }
+
+/* -------------------------------------------------------------------------- */
+/*        Setup gate, bookings switch, conflict preview and safe saves         */
+/* -------------------------------------------------------------------------- */
+
+/** GET /api/availability/state */
+export async function getMyAvailabilityStateController(req: NextRequest) {
+  try {
+    const authUser = await requireAuth(req);
+    const data = await AvailabilityService.getMyState(authUser);
+    return NextResponse.json({ success: true, data });
+  } catch (error: unknown) {
+    return errorResponse("getMyAvailabilityStateController", error);
+  }
+}
+
+/**
+ * PUT /api/availability/state
+ * Body: { accepting: boolean, cancelUpcoming?: boolean, cancelReason?: string }
+ */
+export async function updateMyAvailabilityStateController(req: NextRequest) {
+  try {
+    const authUser = await requireAuth(req);
+    const body = await req.json().catch(() => null);
+    if (!body || typeof body.accepting !== "boolean") {
+      return NextResponse.json({ success: false, error: "accepting must be a boolean" }, { status: 400 });
+    }
+    const data = await AvailabilityService.setAcceptingBookings(authUser, {
+      accepting: body.accepting,
+      cancelUpcoming: body.cancelUpcoming === true,
+      cancelReason: typeof body.cancelReason === "string" ? body.cancelReason.slice(0, 500) : undefined,
+    });
+    auditRequest(req, authUser, {
+      action: body.accepting ? "start_accepting_bookings" : "stop_accepting_bookings",
+      module: "availability",
+      metadata: { cancelUpcoming: body.cancelUpcoming === true, cancelled: data.cancellation.cancelled },
+    });
+    return NextResponse.json({ success: true, data });
+  } catch (error: unknown) {
+    return errorResponse("updateMyAvailabilityStateController", error, 400);
+  }
+}
+
+/** GET /api/availability/weekly */
+export async function getMyWeeklyController(req: NextRequest) {
+  try {
+    const authUser = await requireAuth(req);
+    const data = await AvailabilityService.getMyWeekly(authUser);
+    return NextResponse.json({ success: true, data });
+  } catch (error: unknown) {
+    return errorResponse("getMyWeeklyController", error);
+  }
+}
+
+/** GET /api/availability/appointments?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD */
+export async function getMyAppointmentsController(req: NextRequest) {
+  try {
+    const authUser = await requireAuth(req);
+    const startDate = req.nextUrl.searchParams.get("startDate") ?? "";
+    const endDate = req.nextUrl.searchParams.get("endDate") ?? "";
+    const invalid = validateDateRange(startDate, endDate);
+    if (invalid) {
+      return NextResponse.json({ success: false, error: invalid }, { status: 400 });
+    }
+    const data = await AvailabilityService.getMyAppointments(authUser, startDate, endDate);
+    return NextResponse.json({ success: true, data });
+  } catch (error: unknown) {
+    return errorResponse("getMyAppointmentsController", error);
+  }
+}
+
+/** POST /api/availability/preview — Body: AvailabilityChange. Returns conflicting appointments. */
+export async function previewAvailabilityChangeController(req: NextRequest) {
+  try {
+    const authUser = await requireAuth(req);
+    const body = await req.json().catch(() => null);
+    const data = await AvailabilityService.previewChange(authUser, body?.change ?? body ?? {});
+    return NextResponse.json({ success: true, data });
+  } catch (error: unknown) {
+    return errorResponse("previewAvailabilityChangeController", error, 400);
+  }
+}
+
+/**
+ * POST /api/availability/save
+ * Body: { change: AvailabilityChange, cancelConflicts?: boolean, cancelReason?: string, actionLabel?: string }
+ * Responds 409 when appointments conflict and cancelConflicts was not confirmed.
+ */
+export async function saveAvailabilityChangeController(req: NextRequest) {
+  try {
+    const authUser = await requireAuth(req);
+    const body = await req.json().catch(() => null);
+    if (!body || typeof body !== "object" || !body.change) {
+      return NextResponse.json({ success: false, error: "change is required" }, { status: 400 });
+    }
+    const data = await AvailabilityService.saveChange(authUser, body.change, {
+      cancelConflicts: body.cancelConflicts === true,
+      cancelReason: typeof body.cancelReason === "string" ? body.cancelReason.slice(0, 500) : undefined,
+      actionLabel: typeof body.actionLabel === "string" ? body.actionLabel.slice(0, 200) : undefined,
+    });
+    auditRequest(req, authUser, {
+      action: "update_availability",
+      module: "availability",
+      metadata: {
+        dates: (body.change.dates ?? []).length,
+        weekly: (body.change.weekly ?? []).length,
+        cancelled: data.cancellation.cancelled,
+      },
+    });
+    return NextResponse.json({ success: true, data });
+  } catch (error: unknown) {
+    return errorResponse("saveAvailabilityChangeController", error, 400);
+  }
+}

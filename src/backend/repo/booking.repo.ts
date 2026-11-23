@@ -1,4 +1,5 @@
 import { createClient } from "@/shared/db/supabase.server";
+import { AvailabilityRepository } from "./availability.repo";
 
 export type BookAppointmentInput = {
   userId: string;
@@ -436,6 +437,8 @@ export class BookingRepository {
     const release = await bookingMutex.acquire(lockKey);
 
     try {
+      await AvailabilityRepository.assertBookable(params.practitionerId, params.date, formattedTime);
+
       const { data: existingAppointment, error: appointmentCheckError } =
         await supabase
           .from("appointments")

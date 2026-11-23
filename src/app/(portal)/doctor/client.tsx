@@ -551,6 +551,11 @@ export default function DoctorProfileClient() {
                 <div className="w-5 h-5 rounded-full border-2 border-herb-green border-t-transparent animate-spin mx-auto mb-2" />
                 Loading calendar availability...
               </div>
+            ) : isLegacy && legacyDoc?.acceptingBookings === false ? (
+              <div className="w-full rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800 leading-relaxed">
+                <p className="font-bold mb-0.5">Not taking new bookings right now</p>
+                <p>{doctor?.name ? `Dr. ${doctor.name} has` : "This doctor has"} paused new appointments. Please check back later or choose another doctor.</p>
+              </div>
             ) : !rawAvailableDates || rawAvailableDates.length === 0 ? (
               <div className="text-center w-full py-3 text-xs text-muted-foreground">No available booking dates.</div>
             ) : (

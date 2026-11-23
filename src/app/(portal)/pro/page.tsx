@@ -28,6 +28,8 @@ import { cn } from "@/lib/utils";
 import type { QueuePatient, QueueStatus } from "@/lib/types";
 import { apiClient } from "@/shared/api/api-client";
 import { MISSED_BY_LABEL_FOR_DOCTOR, type ClinicCloseReason } from "@/shared/appointments/attendance";
+import { useAvailabilityState } from "@/hooks/use-availability";
+import { AcceptingBookingsSwitch } from "@/components/availability/AvailabilityDialogs";
 
 type PractitionerUpcomingAppointment = {
   appointmentId: string;
@@ -182,7 +184,8 @@ export default function ProDashboardPage() {
   const doctorName     = practitioner?.name ?? user?.name ?? "Practitioner";
   const doctorInitials = doctorName.split(" ").filter((w: string) => w).map((w: string) => w[0]).join("").slice(0, 2).toUpperCase();
 
-  const [isOnline, setIsOnline] = useState(true);
+  // Single source of truth for "Accepting bookings" + first-time setup gate.
+  const { data: availabilityState, refetch: refetchAvailabilityState } = useAvailabilityState(Boolean(user?.id));
   const [upcomingTab, setUpcomingTab] =
     useState<"today" | "future">("today");
   const [queueFilter, setQueueFilter] =
@@ -533,21 +536,48 @@ export default function ProDashboardPage() {
               Edit Schedule
             </Link>
 
-            {/* Online toggle */}
-            <div className="flex items-center gap-3 bg-[#F8FAFC] px-4 py-3 rounded-[12px] border border-gray-100">
-              <span className="text-sm font-semibold text-gray-600">{isOnline ? "Online" : "Offline"}</span>
-              <button
-                type="button"
-                onClick={() => setIsOnline((online) => !online)}
-                className={cn("relative w-12 h-6 rounded-full transition-all shadow-inner", isOnline ? "bg-emerald-500" : "bg-gray-300")}
-                aria-label={isOnline ? "Go offline" : "Go online"}
-                aria-pressed={isOnline}
-              >
-                <div className={cn("absolute top-1 w-4 h-4 rounded-full bg-white shadow-sm transition-all", isOnline ? "left-7" : "left-1")} />
-              </button>
-            </div>
+            {/* Accepting-bookings switch (same state as the Availability page) */}
+            <AcceptingBookingsSwitch state={availabilityState} onChanged={refetchAvailabilityState} />
           </div>
         </div>
+
+        {/* ── First-time setup: insist on availability before going live ── */}
+        {availabilityState && !availabilityState.configured && (
+          <div className="mb-8 flex flex-col gap-4 rounded-[16px] border border-amber-200 bg-amber-50 p-5 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start gap-4">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-100">
+                <Calendar className="h-5 w-5 text-amber-700" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-amber-900">Set your availability to start receiving patients</h3>
+                <p className="mt-0.5 text-sm text-amber-800">
+                  Patients can&apos;t see or book you yet. We&apos;ve pre-filled Mon–Sat, 9 AM – 5 PM with a 1–2 PM break — review and save it to go live.
+                </p>
+              </div>
+            </div>
+            <Link
+              href="/pro/availability"
+              className="shrink-0 rounded-xl bg-amber-600 px-5 py-2.5 text-center text-sm font-bold text-white shadow-sm hover:bg-amber-700"
+            >
+              Set availability
+            </Link>
+          </div>
+        )}
+
+        {/* ── Bookings paused: queue stays visible, only new bookings stop ── */}
+        {availabilityState?.configured && !availabilityState.acceptingBookings && (
+          <div className="mb-8 flex items-start gap-4 rounded-[16px] border border-gray-200 bg-gray-50 p-5">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gray-100">
+              <Clock className="h-5 w-5 text-gray-500" />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-gray-900">New bookings are paused</h3>
+              <p className="mt-0.5 text-sm text-gray-600">
+                You&apos;re hidden from patients. Appointments you already have are still listed below. Switch &quot;Accepting bookings&quot; back on when you&apos;re ready.
+              </p>
+            </div>
+          </div>
+        )}
 
         {upcomingCalls && upcomingCalls.length > 0 && (
           <div className="mb-8 bg-emerald-50 border border-emerald-200 rounded-[16px] p-5 flex items-center justify-between">
@@ -570,24 +600,7 @@ export default function ProDashboardPage() {
           </div>
         )}
 
-        {/* ── Offline state ─────────────────────────────────────────────── */}
-        {!isOnline ? (
-          <div className="flex flex-col items-center justify-center h-80 bg-white rounded-[16px] border border-[#E5E7EB] shadow-[0_2px_8px_rgba(0,0,0,0.04)] text-center">
-            <div className="w-20 h-20 rounded-full bg-gray-50 flex items-center justify-center mb-5 border border-gray-100">
-              <Clock className="w-8 h-8 text-gray-400" />
-            </div>
-            <p className="text-xl font-bold text-gray-900 mb-2">You are currently offline</p>
-            <p className="text-sm text-gray-500 leading-relaxed max-w-sm mb-6">
-              Toggle online to start receiving new booking requests and manage your patient queue.
-            </p>
-            <button
-              onClick={() => setIsOnline(true)}
-              className="px-8 py-3 bg-indigo-600 text-white rounded-xl text-sm font-bold hover:bg-indigo-700 shadow-[0_4px_12px_rgb(79,70,229,0.25)] transition-all"
-            >
-              Go Online Now
-            </button>
-          </div>
-        ) : (
+        {(
           <>
             {/* ── Stats cards (scoped to the selected day) ────────────── */}
             <div className="grid grid-cols-2 gap-5 mb-8">

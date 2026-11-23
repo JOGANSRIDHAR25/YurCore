@@ -1,6 +1,13 @@
 import "server-only";
 
 import { createClient } from "@/shared/db/supabase.server";
+import {
+  resolveDayPlan,
+  checkTimeAgainstPlan,
+  toIsoDate,
+  type DateOverride,
+  type WeeklyDay,
+} from "@/shared/availability/schedule";
 
 export type TimeRange = {
   start: string;
@@ -67,6 +74,26 @@ export type BlockedDateRow = {
   reason: string;
 };
 
+export type AvailabilityState = {
+  acceptingBookings: boolean;
+  configured: boolean;
+  /** Patients can see and book this doctor. */
+  bookable: boolean;
+};
+
+export type UpcomingAppointment = {
+  id: string;
+  patientId: string | null;
+  patientName: string;
+  familyMemberName: string | null;
+  date: string;
+  time: string;
+  durationMin: number;
+  mode: string;
+  status: string;
+  reason: string | null;
+};
+
 type ScheduleSource = {
   start_time: string;
   end_time: string;
@@ -130,13 +157,6 @@ function toLocalIsoDate(date: Date): string {
   return `${year}-${month}-${day}`;
 }
 
-function getDatabaseDay(date: string): number {
-  const [year, month, day] = date.split("-").map(Number);
-  const jsDay = new Date(year, month - 1, day).getDay();
-
-  return jsDay === 0 ? 6 : jsDay - 1;
-}
-
 function addInterval(
   intervals: { start: number; end: number }[],
   startTime?: string | null,
@@ -182,77 +202,27 @@ export class AvailabilityRepository {
   static async getAvailableDatesForPractitioner(
     practitionerId: string,
   ): Promise<string[]> {
-    const supabase = await createClient();
+    const state = await this.getAvailabilityState(practitionerId);
+    if (!state.bookable) return [];
 
-    const [
-      { data: recurringData, error: recError },
-      { data: calendarData, error: calError },
-    ] = await Promise.all([
-      supabase
-        .from("availability_schedules")
-        .select("day_of_week")
-        .eq("practitioner_id", practitionerId)
-        .eq("is_active", true),
-      supabase
-        .from("calendar_availability")
-        .select("date, working_start, working_end, is_holiday, is_leave")
-        .eq("practitioner_id", practitionerId),
-    ]);
-
-    if (recError) {
-      console.error(
-        "[AvailabilityRepository] Failed to fetch recurring schedules:",
-        recError.message,
-      );
-    }
-
-    if (calError) {
-      console.error(
-        "[AvailabilityRepository] Failed to fetch calendar availability:",
-        calError.message,
-      );
-    }
-
-    const activeDays = new Set(
-      (recurringData ?? []).map((row: any) => row.day_of_week),
+    const today = toIsoDate(new Date());
+    const horizon = new Date();
+    horizon.setDate(horizon.getDate() + 89);
+    const { weekly, overrides } = await this.loadScheduleInputs(
+      practitionerId,
+      today,
+      toIsoDate(horizon),
     );
 
-    const calendarMap = new Map<string, any>();
-    (calendarData ?? []).forEach((row: any) => {
-      if (row.date) {
-        calendarMap.set(row.date, row);
-      }
-    });
-
     const dates: string[] = [];
-    const today = new Date();
-
     for (let index = 0; index < 90; index += 1) {
-      const current = new Date(today);
-      current.setDate(today.getDate() + index);
-      const isoDate = toLocalIsoDate(current);
-
-      const calEntry = calendarMap.get(isoDate);
-
-      if (calEntry) {
-        if (
-          !calEntry.is_holiday &&
-          !calEntry.is_leave &&
-          calEntry.working_start &&
-          calEntry.working_end
-        ) {
-          dates.push(isoDate);
-        }
-      } else {
-        const jsDay = current.getDay();
-        const databaseDay = jsDay === 0 ? 6 : jsDay - 1;
-
-        if (activeDays.has(databaseDay) || activeDays.size === 0) {
-          dates.push(isoDate);
-        }
+      const current = new Date();
+      current.setDate(current.getDate() + index);
+      const isoDate = toIsoDate(current);
+      if (resolveDayPlan(isoDate, overrides.get(isoDate), weekly).available) {
+        dates.push(isoDate);
       }
     }
-
     return dates;
   }
 
@@ -276,93 +246,22 @@ export class AvailabilityRepository {
       return [];
     }
 
-    const dayOfWeek = getDatabaseDay(date);
-
-    const [
-      { data: calendarSchedule, error: calendarError },
-      { data: recurringSchedule, error: recurringError },
-    ] = await Promise.all([
-      supabase
-        .from("calendar_availability")
-        .select(
-          "working_start, working_end, breaks, op_timings, is_holiday, is_leave",
-        )
-        .eq("practitioner_id", practitionerId)
-        .eq("date", date)
-        .maybeSingle(),
-      supabase
-        .from("availability_schedules")
-        .select(
-          "start_time, end_time, break_start, break_end, breaks, op_timings, is_active",
-        )
-        .eq("practitioner_id", practitionerId)
-        .eq("day_of_week", dayOfWeek)
-        .maybeSingle(),
-    ]);
-
-    if (calendarError) {
-      console.error(
-        "[AvailabilityRepository] Calendar schedule fetch failed:",
-        calendarError.message,
-      );
-    }
-
-    if (recurringError) {
-      console.error(
-        "[AvailabilityRepository] Recurring schedule fetch failed:",
-        recurringError.message,
-      );
-    }
-
     let schedule: ScheduleSource | null = null;
 
-    if (calendarSchedule) {
-      const unavailable =
-        calendarSchedule.is_holiday ||
-        calendarSchedule.is_leave ||
-        !calendarSchedule.working_start ||
-        !calendarSchedule.working_end;
-
-      if (!unavailable) {
+    const state = await this.getAvailabilityState(practitionerId);
+    if (state.bookable) {
+      const { weekly, overrides } = await this.loadScheduleInputs(practitionerId, date, date);
+      const plan = resolveDayPlan(date, overrides.get(date), weekly);
+      if (plan.available) {
         schedule = {
-          start_time: calendarSchedule.working_start,
-          end_time: calendarSchedule.working_end,
+          start_time: plan.start,
+          end_time: plan.end,
           break_start: null,
           break_end: null,
-          breaks: Array.isArray(calendarSchedule.breaks)
-            ? calendarSchedule.breaks
-            : [],
-          op_timings: Array.isArray(calendarSchedule.op_timings)
-            ? calendarSchedule.op_timings
-            : [],
+          breaks: plan.breaks,
+          op_timings: plan.opTimings,
         };
       }
-    } else if (
-      recurringSchedule?.is_active &&
-      recurringSchedule.start_time &&
-      recurringSchedule.end_time
-    ) {
-      schedule = {
-        start_time: recurringSchedule.start_time,
-        end_time: recurringSchedule.end_time,
-        break_start: recurringSchedule.break_start,
-        break_end: recurringSchedule.break_end,
-        breaks: Array.isArray(recurringSchedule.breaks)
-          ? recurringSchedule.breaks
-          : [],
-        op_timings: Array.isArray(recurringSchedule.op_timings)
-          ? recurringSchedule.op_timings
-          : [],
-      };
-    } else {
-      schedule = {
-        start_time: "09:00:00",
-        end_time: "17:00:00",
-        break_start: "13:00:00",
-        break_end: "14:00:00",
-        breaks: [{ start: "13:00:00", end: "14:00:00" }],
-        op_timings: [],
-      };
     }
 
     if (!schedule) {
@@ -858,4 +757,327 @@ export class AvailabilityRepository {
       reason: row.reason ?? "",
     }));
   }
+
+  /* ---------------------------------------------------------------------- */
+  /*                Availability state (setup gate + bookings switch)        */
+  /* ---------------------------------------------------------------------- */
+
+  static async getAvailabilityState(practitionerId: string): Promise<AvailabilityState> {
+    const supabase = await createClient();
+    const { data, error } = await supabase
+      .from("practitioners")
+      .select("*")
+      .eq("id", practitionerId)
+      .maybeSingle();
+
+    if (error || !data) {
+      if (error) console.error("[AvailabilityRepository] State fetch failed:", error.message);
+      return { acceptingBookings: false, configured: false, bookable: false };
+    }
+    return availabilityStateFromRow(data);
+  }
+
+  static async setAcceptingBookings(practitionerId: string, accepting: boolean): Promise<void> {
+    const supabase = await createClient();
+    const { error } = await supabase
+      .from("practitioners")
+      .update({ accepting_bookings: accepting })
+      .eq("id", practitionerId);
+    if (error) {
+      console.error("[AvailabilityRepository] accepting_bookings update failed:", error.message);
+      throw new Error(
+        "Could not update booking status. Make sure the 'practitioner availability state' migration has been applied.",
+      );
+    }
+  }
+
+  static async markAvailabilityConfigured(practitionerId: string): Promise<void> {
+    const supabase = await createClient();
+    const { error } = await supabase
+      .from("practitioners")
+      .update({ availability_configured_at: new Date().toISOString() })
+      .eq("id", practitionerId)
+      .is("availability_configured_at", null);
+    // Column not created yet (migration pending): every doctor is treated as
+    // configured in that case, so there's nothing to record.
+    if (error && (error.code === "42703" || error.code === "PGRST204")) {
+      console.warn("[AvailabilityRepository] availability_configured_at column missing — run the availability state migration.");
+      return;
+    }
+    if (error) {
+      console.error("[AvailabilityRepository] availability_configured_at update failed:", error.message);
+      throw new Error(
+        "Could not mark availability as set up. Make sure the 'practitioner availability state' migration has been applied.",
+      );
+    }
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /*                         Schedule inputs + guards                         */
+  /* ---------------------------------------------------------------------- */
+
+  static async loadScheduleInputs(
+    practitionerId: string,
+    startDate: string,
+    endDate: string,
+  ): Promise<{ weekly: WeeklyDay[]; overrides: Map<string, DateOverride> }> {
+    const supabase = await createClient();
+    const [{ data: weeklyRows, error: weeklyError }, { data: calendarRows, error: calendarError }] =
+      await Promise.all([
+        supabase
+          .from("availability_schedules")
+          .select("day_of_week, start_time, end_time, break_start, break_end, breaks, op_timings, is_active")
+          .eq("practitioner_id", practitionerId),
+        supabase
+          .from("calendar_availability")
+          .select("date, working_start, working_end, breaks, op_timings, is_holiday, is_leave")
+          .eq("practitioner_id", practitionerId)
+          .gte("date", startDate)
+          .lte("date", endDate),
+      ]);
+
+    if (weeklyError) console.error("[AvailabilityRepository] Weekly schedule fetch failed:", weeklyError.message);
+    if (calendarError) console.error("[AvailabilityRepository] Calendar fetch failed:", calendarError.message);
+
+    const weekly: WeeklyDay[] = (weeklyRows ?? []).map((row: any) => {
+      const breaks: TimeRange[] = Array.isArray(row.breaks) ? [...row.breaks] : [];
+      if (row.break_start && row.break_end && !breaks.some((b) => b.start?.slice(0, 5) === row.break_start.slice(0, 5))) {
+        breaks.push({ start: row.break_start, end: row.break_end });
+      }
+      return {
+        dayOfWeek: row.day_of_week,
+        startTime: row.start_time ?? "",
+        endTime: row.end_time ?? "",
+        breaks,
+        opTimings: Array.isArray(row.op_timings) ? row.op_timings : [],
+        isActive: row.is_active ?? true,
+      };
+    });
+
+    const overrides = new Map<string, DateOverride>();
+    (calendarRows ?? []).forEach((row: any) => {
+      overrides.set(row.date, {
+        date: row.date,
+        working_start: row.working_start,
+        working_end: row.working_end,
+        breaks: Array.isArray(row.breaks) ? row.breaks : [],
+        op_timings: Array.isArray(row.op_timings) ? row.op_timings : [],
+        is_holiday: row.is_holiday ?? false,
+        is_leave: row.is_leave ?? false,
+      });
+    });
+
+    return { weekly, overrides };
+  }
+
+  /**
+   * Last line of defence at booking time: the doctor must be live and the
+   * requested time must still be inside their hours for that date (a slot row
+   * may have been generated before the doctor took leave or changed hours).
+   */
+  static async assertBookable(practitionerId: string, date: string, time: string): Promise<void> {
+    const state = await this.getAvailabilityState(practitionerId);
+    if (!state.bookable) {
+      throw new Error("This doctor is not accepting bookings right now. Please choose another doctor or try later.");
+    }
+    const [{ weekly, overrides }, duration] = await Promise.all([
+      this.loadScheduleInputs(practitionerId, date, date),
+      this.getSlotDuration(practitionerId),
+    ]);
+    const plan = resolveDayPlan(date, overrides.get(date), weekly);
+    if (!checkTimeAgainstPlan(plan, time, duration).ok) {
+      throw new Error("Slot is no longer available — the doctor has changed their availability for this day.");
+    }
+  }
+
+  static async getSlotDuration(practitionerId: string): Promise<number> {
+    const supabase = await createClient();
+    const { data } = await supabase
+      .from("practitioners")
+      .select("slot_duration_min")
+      .eq("id", practitionerId)
+      .maybeSingle();
+    return data?.slot_duration_min || 20;
+  }
+
+  /** Upserts only the given weekdays, leaving the others untouched. */
+  static async upsertWeeklyDays(practitionerId: string, days: WeeklyDay[]): Promise<void> {
+    if (days.length === 0) return;
+    const supabase = await createClient();
+    const dayNumbers = days.map((d) => d.dayOfWeek);
+
+    const { error: deleteError } = await supabase
+      .from("availability_schedules")
+      .delete()
+      .eq("practitioner_id", practitionerId)
+      .in("day_of_week", dayNumbers);
+    if (deleteError) {
+      console.error("[AvailabilityRepository] Weekly day delete failed:", deleteError.message);
+      throw deleteError;
+    }
+
+    const { error } = await supabase.from("availability_schedules").insert(
+      days.map((d) => ({
+        practitioner_id: practitionerId,
+        day_of_week: d.dayOfWeek,
+        start_time: d.startTime || null,
+        end_time: d.endTime || null,
+        break_start: null,
+        break_end: null,
+        breaks: d.breaks ?? [],
+        op_timings: d.opTimings ?? [],
+        is_active: d.isActive,
+      })),
+    );
+    if (error) {
+      console.error("[AvailabilityRepository] Weekly day insert failed:", error.message);
+      throw error;
+    }
+  }
+
+  /** Removes date overrides so those dates fall back to the weekly schedule. */
+  static async deleteCalendarOverrides(practitionerId: string, dates: string[]): Promise<void> {
+    if (dates.length === 0) return;
+    const supabase = await createClient();
+    const { error } = await supabase
+      .from("calendar_availability")
+      .delete()
+      .eq("practitioner_id", practitionerId)
+      .in("date", dates);
+    if (error) {
+      console.error("[AvailabilityRepository] Calendar override delete failed:", error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Drops not-yet-booked slot rows so they are regenerated from the new
+   * schedule on the next fetch. Pass `dates` to limit it, or omit for all
+   * future dates.
+   */
+  static async purgeOpenSlots(practitionerId: string, dates?: string[]): Promise<void> {
+    const supabase = await createClient();
+    let query = supabase
+      .from("slots")
+      .delete()
+      .eq("practitioner_id", practitionerId)
+      .eq("status", "open");
+    query = dates ? query.in("slot_date", dates) : query.gte("slot_date", toIsoDate(new Date()));
+    const { error } = await query;
+    if (error) console.error("[AvailabilityRepository] Open slot purge failed:", error.message);
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /*                         Doctor's own appointments                        */
+  /* ---------------------------------------------------------------------- */
+
+  static async getActiveAppointments(
+    practitionerId: string,
+    startDate: string,
+    endDate?: string,
+  ): Promise<UpcomingAppointment[]> {
+    const supabase = await createClient();
+    let query = supabase
+      .from("appointments")
+      .select(`
+        id, patient_id, scheduled_date, scheduled_time, duration_min, mode, status, reason_for_visit,
+        patient:patients ( full_name ),
+        family_member:family_members ( full_name )
+      `)
+      .or(`practitioner_id.eq.${practitionerId},doctor_profile_id.eq.${practitionerId}`)
+      .not("status", "in", '("cancelled","completed","no_show")')
+      .gte("scheduled_date", startDate)
+      .order("scheduled_date", { ascending: true })
+      .order("scheduled_time", { ascending: true });
+    if (endDate) query = query.lte("scheduled_date", endDate);
+
+    const [{ data, error }, fallbackDuration] = await Promise.all([query, this.getSlotDuration(practitionerId)]);
+    if (error) {
+      console.error("[AvailabilityRepository] Appointment fetch failed:", error.message);
+      throw new Error("Failed to load appointments");
+    }
+
+    const seen = new Set<string>();
+    return (data ?? [])
+      .filter((row: any) => (seen.has(row.id) ? false : (seen.add(row.id), true)))
+      .map((row: any) => {
+        const patient = Array.isArray(row.patient) ? row.patient[0] : row.patient;
+        const member = Array.isArray(row.family_member) ? row.family_member[0] : row.family_member;
+        return {
+          id: row.id,
+          patientId: row.patient_id ?? null,
+          patientName: member?.full_name || patient?.full_name || "Patient",
+          familyMemberName: member?.full_name ?? null,
+          date: row.scheduled_date,
+          time: (row.scheduled_time ?? "").slice(0, 5),
+          durationMin: row.duration_min || fallbackDuration,
+          mode: row.mode ?? "clinic",
+          status: row.status,
+          reason: row.reason_for_visit ?? null,
+        };
+      });
+  }
+
+  static async getPractitionerContact(
+    practitionerId: string,
+  ): Promise<{ name: string; email: string | null; userId: string | null }> {
+    const supabase = await createClient();
+    const { data } = await supabase
+      .from("practitioners")
+      .select("full_name, user_id, user:users!practitioners_user_id_fkey ( email )")
+      .eq("id", practitionerId)
+      .maybeSingle();
+    const user: any = data ? (Array.isArray((data as any).user) ? (data as any).user[0] : (data as any).user) : null;
+    return { name: data?.full_name || "Doctor", email: user?.email ?? null, userId: data?.user_id ?? null };
+  }
+
+  /** In-app notification for the patient (or the family account owner). */
+  static async notifyUser(
+    userId: string,
+    title: string,
+    body: string,
+    appointmentId: string,
+  ): Promise<void> {
+    const supabase = await createClient();
+    const { error } = await supabase.from("notifications").insert({
+      user_id: userId,
+      channel: "in_app",
+      title,
+      body,
+      type: "appointment_cancelled",
+      reference_id: appointmentId,
+      reference_type: "appointment",
+      is_read: false,
+    });
+    if (error) console.error("[AvailabilityRepository] Notification insert failed:", error.message);
+  }
+
+  static async getPatientUserId(patientId: string): Promise<string | null> {
+    const supabase = await createClient();
+    const { data } = await supabase.from("patients").select("user_id").eq("id", patientId).maybeSingle();
+    if (data?.user_id) return data.user_id;
+    const { data: family } = await supabase
+      .from("family_members")
+      .select("owner_patient_id")
+      .eq("patient_id", patientId)
+      .limit(1)
+      .maybeSingle();
+    if (!family?.owner_patient_id) return null;
+    const { data: owner } = await supabase
+      .from("patients")
+      .select("user_id")
+      .eq("id", family.owner_patient_id)
+      .maybeSingle();
+    return owner?.user_id ?? null;
+  }
+}
+
+/**
+ * Columns may be missing until the migration is applied — treat a missing
+ * column as "live" so existing doctors don't disappear in the meantime.
+ */
+export function availabilityStateFromRow(row: Record<string, unknown>): AvailabilityState {
+  const acceptingBookings = row.accepting_bookings !== false;
+  const configured = !("availability_configured_at" in row) || row.availability_configured_at !== null;
+  return { acceptingBookings, configured, bookable: acceptingBookings && configured };
 }

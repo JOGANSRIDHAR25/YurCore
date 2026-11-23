@@ -1,6 +1,7 @@
 import "server-only";
 
 import { createClient } from "@/shared/db/supabase.server";
+import { AvailabilityRepository } from "./availability.repo";
 
 /* -------------------------------------------------------------------------- */
 /*                                   Types                                    */
@@ -803,6 +804,13 @@ export class AppointmentsRepository {
         "The selected appointment slot has already been booked",
       );
     }
+
+    // The slot row may predate leave / new hours / paused bookings.
+    await AvailabilityRepository.assertBookable(
+      slot.practitioner_id,
+      slot.slot_date,
+      slot.start_time,
+    );
 
     const { data, error } = await supabase
       .from("appointments")

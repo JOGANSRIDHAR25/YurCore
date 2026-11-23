@@ -31,6 +31,8 @@ export interface Practitioner {
   city?: string;
   clinicName?: string;
   clinicAddress?: string;
+  /** False when the doctor paused bookings or hasn't set up availability yet. */
+  acceptingBookings?: boolean;
 }
 
 export type ReviewRow = {

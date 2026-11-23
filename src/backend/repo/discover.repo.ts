@@ -3,6 +3,12 @@ import type { Practitioner } from "@/features/doctor/types/doctor.types";
 import { bookingMutex, toHHMM } from "./booking.repo";
 import { resolveActiveFeeRupees, resolveConsultModes } from "@/lib/fee";
 import { ENABLE_VIDEO_CONSULTATION } from "@/lib/feature-flags";
+import { availabilityStateFromRow } from "./availability.repo";
+
+/** Patients only see doctors who finished availability setup and are accepting bookings. */
+function isVisibleToPatients(row: Record<string, unknown>): boolean {
+  return availabilityStateFromRow(row).bookable;
+}
 
 
 export type DiscoverMetadata = {
@@ -66,6 +72,7 @@ function mapPractitioner(row: any): Practitioner {
     city: row.city ?? "",
     clinicName: row.clinic_hospital_name ?? "",
     clinicAddress: row.clinic_hospital_address ?? "",
+    acceptingBookings: isVisibleToPatients(row),
   };
 }
 
@@ -168,7 +175,7 @@ export class DiscoverRepository {
       throw new Error("Failed to fetch practitioners from database");
     }
 
-    return (data ?? []).map(mapPractitioner);
+    return (data ?? []).filter(isVisibleToPatients).map(mapPractitioner);
   }
 
   static async getPractitionerById(id: string): Promise<Practitioner | null> {
@@ -247,7 +254,7 @@ export class DiscoverRepository {
       throw new Error("Failed to fetch doctors from database");
     }
 
-    let filtered = (doctors || []).map((d: any) => ({
+    let filtered = (doctors || []).filter(isVisibleToPatients).map((d: any) => ({
       ...d,
       is_active: d.verification_status === "verified",
       consultation_fee: resolveActiveFeeRupees(d.base_video_fee, d.base_clinic_fee),

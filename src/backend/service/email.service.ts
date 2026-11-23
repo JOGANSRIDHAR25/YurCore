@@ -17,6 +17,14 @@ import {
   appointmentMissedPractitionerTemplate,
   type AppointmentMissedPractitionerTemplateInput,
 } from "@/lib/email/templates/appointment-missed-practitioner";
+import {
+  appointmentCancelledByPractitionerTemplate,
+  type AppointmentCancelledByPractitionerTemplateInput,
+} from "@/lib/email/templates/appointment-cancelled-by-practitioner";
+import {
+  practitionerCancellationSummaryTemplate,
+  type PractitionerCancellationSummaryInput,
+} from "@/lib/email/templates/practitioner-cancellation-summary";
 import { invoiceTemplate, type InvoiceTemplateInput } from "@/lib/email/templates/invoice";
 import {
   prescriptionTemplate,
@@ -52,6 +60,36 @@ export class EmailService {
       await EmailRepository.sendEmail({ to, subject, html, text });
     } catch (error) {
       console.error("[EmailService] sendAppointmentCancelled failed:", error);
+    }
+  }
+
+  /** Returns whether the email was handed off successfully (shown to the doctor). */
+  static async sendAppointmentCancelledByPractitioner(
+    to: string,
+    input: AppointmentCancelledByPractitionerTemplateInput,
+  ): Promise<boolean> {
+    if (!to) return false;
+    try {
+      const { subject, html, text } = appointmentCancelledByPractitionerTemplate(input);
+      const result = await EmailRepository.sendEmailWithResult({ to, subject, html, text });
+      if (!result.ok) console.error("[EmailService] sendAppointmentCancelledByPractitioner failed:", result.error);
+      return result.ok;
+    } catch (error) {
+      console.error("[EmailService] sendAppointmentCancelledByPractitioner failed:", error);
+      return false;
+    }
+  }
+
+  static async sendPractitionerCancellationSummary(
+    to: string,
+    input: PractitionerCancellationSummaryInput,
+  ): Promise<void> {
+    if (!to || input.appointments.length === 0) return;
+    try {
+      const { subject, html, text } = practitionerCancellationSummaryTemplate(input);
+      await EmailRepository.sendEmail({ to, subject, html, text });
+    } catch (error) {
+      console.error("[EmailService] sendPractitionerCancellationSummary failed:", error);
     }
   }
 
